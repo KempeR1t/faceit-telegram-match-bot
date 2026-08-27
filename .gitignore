@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.venv/
+faceit_env/
+__pycache__/
+*.py[cod]
+*.log
+data/
+last_matches.json
+.pytest_cache/
+.coverage
+.DS_Store
+.idea/
+.vscode/
