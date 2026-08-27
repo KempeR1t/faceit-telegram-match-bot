@@ -278,26 +278,6 @@ faceit_env/bin/python3 -m pip install -r requirements.txt
 ./run_bot.sh
 ```
 
-### Переход с `FACEIT_PLAYERS` на `players.json`
-
-После обновления создать файл `players.json` в корне проекта:
-
-```json
-{
-  "11111111-1111-4111-8111-111111111111": "Nickname1",
-  "22222222-2222-4222-8222-222222222222": "Nickname2"
-}
-```
-
-Затем удалить из `.env` старую переменную `FACEIT_PLAYERS` и добавить:
-
-```dotenv
-FACEIT_PLAYERS_FILE=players.json
-```
-
-`last_matches.json` менять или удалять не нужно: после миграции бот продолжит
-работу с уже сохранённого состояния.
-
 ## Тесты
 
 ```bash
