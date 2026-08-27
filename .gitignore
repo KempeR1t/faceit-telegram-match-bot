@@ -8,6 +8,7 @@ __pycache__/
 *.log
 data/
 last_matches.json
+players.json
 .pytest_cache/
 .coverage
 .DS_Store

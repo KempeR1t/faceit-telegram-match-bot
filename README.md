@@ -13,7 +13,7 @@ Python-бот для отслеживания завершённых матче�
 - карта, счёт, длительность, результат, K/D, ADR и MVP;
 - защита от повторных уведомлений через `last_matches.json`;
 - повторная попытка на следующем запуске, если Telegram не принял сообщение;
-- конфигурация и секреты только через переменные окружения;
+- секреты через переменные окружения, список игроков в отдельном JSON-файле;
 - таймауты и повторные GET-запросы при временных ошибках FACEIT API;
 - совместимость с Python 3.10+ и Ubuntu 24.04.
 
@@ -25,6 +25,7 @@ Python-бот для отслеживания завершённых матче�
 ├── run_bot.sh
 ├── requirements.txt
 ├── .env.example
+├── players.example.json
 ├── tools/
 │   ├── resolve_faceit_players.py
 │   └── list_telegram_chats.py
@@ -65,11 +66,14 @@ FACEIT player ID — UUID игрока, например
 ```bash
 read -rsp "FACEIT API key: " FACEIT_API_KEY; echo
 export FACEIT_API_KEY
-faceit_env/bin/python3 tools/resolve_faceit_players.py Nickname1 Nickname2
+faceit_env/bin/python3 tools/resolve_faceit_players.py \
+  Nickname1 Nickname2 \
+  --output players.json
 unset FACEIT_API_KEY
 ```
 
-Скрипт выведет найденные ID и готовую строку `FACEIT_PLAYERS`.
+Скрипт найдёт ID и создаст готовый `players.json`. Если файл уже существует,
+его можно отредактировать вручную или явно заменить с помощью `--force`.
 
 ## Создание Telegram-бота
 
@@ -115,8 +119,11 @@ faceit_env/bin/python3 -m pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
+cp players.example.json players.json
 chmod 600 .env
+chmod 600 players.json
 nano .env
+nano players.json
 ```
 
 Пример:
@@ -125,7 +132,7 @@ nano .env
 FACEIT_API_KEY=faceit_api_key
 TELEGRAM_BOT_TOKEN=telegram_bot_token
 TELEGRAM_CHAT_ID=-1001234567890
-FACEIT_PLAYERS=11111111-1111-4111-8111-111111111111:Nickname1,22222222-2222-4222-8222-222222222222:Nickname2
+FACEIT_PLAYERS_FILE=players.json
 
 FACEIT_GAME=cs2
 APP_TIMEZONE=Europe/Moscow
@@ -138,6 +145,18 @@ LOG_LEVEL=INFO
 Файл `.env` исключён из Git. Значения из него загружаются в окружение процесса
 скриптом `run_bot.sh`.
 
+Игроки настраиваются отдельно в `players.json`:
+
+```json
+{
+  "11111111-1111-4111-8111-111111111111": "Nickname1",
+  "22222222-2222-4222-8222-222222222222": "Nickname2"
+}
+```
+
+`players.json` также исключён из Git. В репозитории находится только безопасный
+шаблон `players.example.json`.
+
 ### Переменные окружения
 
 | Переменная | Обязательна | Назначение |
@@ -145,7 +164,7 @@ LOG_LEVEL=INFO
 | `FACEIT_API_KEY` | да | server-side API key FACEIT |
 | `TELEGRAM_BOT_TOKEN` | да | токен Telegram-бота |
 | `TELEGRAM_CHAT_ID` | да | ID личного чата, группы или канала |
-| `FACEIT_PLAYERS` | да | пары `player_uuid:Nickname` через запятую |
+| `FACEIT_PLAYERS_FILE` | нет | путь к списку игроков, по умолчанию `players.json` |
 | `FACEIT_GAME` | нет | идентификатор игры, по умолчанию `cs2` |
 | `APP_TIMEZONE` | нет | часовой пояс, по умолчанию `Europe/Moscow` |
 | `STATE_FILE` | нет | файл состояния, по умолчанию `last_matches.json` |
@@ -153,13 +172,17 @@ LOG_LEVEL=INFO
 | `NOTIFY_ON_FIRST_RUN` | нет | отправлять ли последний матч при первом запуске |
 | `LOG_LEVEL` | нет | `DEBUG`, `INFO`, `WARNING`, `ERROR` или `CRITICAL` |
 
-Формат `FACEIT_PLAYERS`:
+Формат файла игроков:
 
-```text
-player_id:nickname,player_id:nickname
+```json
+{
+  "11111111-1111-4111-8111-111111111111": "Nickname1",
+  "22222222-2222-4222-8222-222222222222": "Nickname2"
+}
 ```
 
-Никнейм не должен содержать запятую или двоеточие.
+Относительный путь в `FACEIT_PLAYERS_FILE` считается от корня проекта. Бот
+проверяет корректность JSON, UUID, пустые никнеймы и повторяющиеся ID.
 
 ## Проверка конфигурации
 
@@ -254,6 +277,26 @@ git pull --ff-only
 faceit_env/bin/python3 -m pip install -r requirements.txt
 ./run_bot.sh
 ```
+
+### Переход с `FACEIT_PLAYERS` на `players.json`
+
+После обновления создать файл `players.json` в корне проекта:
+
+```json
+{
+  "11111111-1111-4111-8111-111111111111": "Nickname1",
+  "22222222-2222-4222-8222-222222222222": "Nickname2"
+}
+```
+
+Затем удалить из `.env` старую переменную `FACEIT_PLAYERS` и добавить:
+
+```dotenv
+FACEIT_PLAYERS_FILE=players.json
+```
+
+`last_matches.json` менять или удалять не нужно: после миграции бот продолжит
+работу с уже сохранённого состояния.
 
 ## Тесты
 

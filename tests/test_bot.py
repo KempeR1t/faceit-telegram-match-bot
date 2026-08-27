@@ -11,8 +11,8 @@ from bot import (
     ConfigurationError,
     LatestMatchResult,
     format_duration,
+    load_players_file,
     load_state,
-    parse_players,
     run_once,
 )
 
@@ -84,12 +84,52 @@ def make_config(state_file: Path, notify_on_first_run: bool = False) -> Config:
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_parse_players(self) -> None:
-        self.assertEqual(parse_players(f"{PLAYER_ID}:PlayerOne"), {PLAYER_ID: "PlayerOne"})
+    def test_load_players_file_rejects_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            players_file = Path(temporary_directory) / "missing.json"
 
-    def test_parse_players_rejects_invalid_id(self) -> None:
-        with self.assertRaises(ConfigurationError):
-            parse_players("not-a-player-id:PlayerOne")
+            with self.assertRaises(ConfigurationError):
+                load_players_file(players_file)
+
+    def test_load_players_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            players_file = Path(temporary_directory) / "players.json"
+            players_file.write_text(
+                json.dumps({PLAYER_ID: "PlayerOne"}), encoding="utf-8"
+            )
+
+            self.assertEqual(
+                load_players_file(players_file), {PLAYER_ID: "PlayerOne"}
+            )
+
+    def test_load_players_file_rejects_invalid_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            players_file = Path(temporary_directory) / "players.json"
+            players_file.write_text(
+                json.dumps({"not-a-player-id": "PlayerOne"}), encoding="utf-8"
+            )
+
+            with self.assertRaises(ConfigurationError):
+                load_players_file(players_file)
+
+    def test_load_players_file_rejects_duplicate_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            players_file = Path(temporary_directory) / "players.json"
+            players_file.write_text(
+                f'{{"{PLAYER_ID}": "One", "{PLAYER_ID}": "Two"}}',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigurationError):
+                load_players_file(players_file)
+
+    def test_load_players_file_rejects_empty_object(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            players_file = Path(temporary_directory) / "players.json"
+            players_file.write_text("{}", encoding="utf-8")
+
+            with self.assertRaises(ConfigurationError):
+                load_players_file(players_file)
 
     def test_format_duration(self) -> None:
         self.assertEqual(format_duration(125), "2м 5с")

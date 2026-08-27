@@ -62,7 +62,14 @@ class Config:
         faceit_api_key = required_env("FACEIT_API_KEY")
         telegram_bot_token = required_env("TELEGRAM_BOT_TOKEN")
         telegram_chat_id = required_env("TELEGRAM_CHAT_ID")
-        players = parse_players(required_env("FACEIT_PLAYERS"))
+
+        raw_players_file = os.getenv("FACEIT_PLAYERS_FILE", "players.json").strip()
+        if not raw_players_file:
+            raise ConfigurationError("FACEIT_PLAYERS_FILE must not be empty.")
+        players_file = Path(raw_players_file).expanduser()
+        if not players_file.is_absolute():
+            players_file = BASE_DIR / players_file
+        players = load_players_file(players_file)
 
         game_id = os.getenv("FACEIT_GAME", "cs2").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
@@ -124,45 +131,75 @@ def required_env(name: str) -> str:
     return value
 
 
-def parse_players(raw_value: str) -> dict[str, str]:
-    """Parse FACEIT_PLAYERS in the form player_uuid:nickname,..."""
-    players: dict[str, str] = {}
+def json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ConfigurationError(f"Duplicate key in players file: {key}.")
+        result[key] = value
+    return result
 
-    for raw_entry in raw_value.split(","):
-        entry = raw_entry.strip()
-        if not entry:
-            continue
-        if ":" not in entry:
+
+def load_players_file(players_file: Path) -> dict[str, str]:
+    """Load and validate a JSON object mapping FACEIT player IDs to nicknames."""
+    try:
+        with players_file.open("r", encoding="utf-8") as file_handle:
+            payload = json.load(
+                file_handle, object_pairs_hook=json_object_without_duplicates
+            )
+    except FileNotFoundError as exc:
+        raise ConfigurationError(
+            f"Players file not found: {players_file}. Copy players.example.json "
+            "to players.json and edit it."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"Players file contains invalid JSON: {players_file} "
+            f"(line {exc.lineno}, column {exc.colno})."
+        ) from exc
+    except UnicodeError as exc:
+        raise ConfigurationError(
+            f"Players file must be valid UTF-8: {players_file}."
+        ) from exc
+    except OSError as exc:
+        raise ConfigurationError(f"Cannot read players file: {players_file}.") from exc
+
+    if not isinstance(payload, dict):
+        raise ConfigurationError("Players file must contain a JSON object.")
+
+    players: dict[str, str] = {}
+    for raw_player_id, raw_nickname in payload.items():
+        if not isinstance(raw_player_id, str) or not isinstance(raw_nickname, str):
             raise ConfigurationError(
-                "Each FACEIT_PLAYERS entry must have the form player_id:nickname."
+                "Every players file entry must map a player ID string to a "
+                "nickname string."
             )
 
-        raw_player_id, nickname = entry.split(":", 1)
-        raw_player_id = raw_player_id.strip()
-        nickname = nickname.strip()
-
         try:
-            player_id = str(UUID(raw_player_id))
+            player_id = str(UUID(raw_player_id.strip()))
         except ValueError as exc:
             raise ConfigurationError(
-                f"Invalid FACEIT player ID in FACEIT_PLAYERS: {raw_player_id!r}."
+                f"Invalid FACEIT player ID in players file: {raw_player_id!r}."
             ) from exc
 
+        nickname = raw_nickname.strip()
         if not nickname:
             raise ConfigurationError(
                 f"Nickname is missing for FACEIT player {player_id}."
             )
-        if any(character in nickname for character in {",", ":", "\n", "\r"}):
+        if "\n" in nickname or "\r" in nickname:
             raise ConfigurationError(
-                f"Nickname {nickname!r} contains an unsupported separator."
+                f"Nickname for FACEIT player {player_id} contains a line break."
             )
         if player_id in players:
-            raise ConfigurationError(f"Duplicate FACEIT player ID: {player_id}.")
+            raise ConfigurationError(
+                f"Duplicate FACEIT player ID after UUID normalization: {player_id}."
+            )
 
         players[player_id] = nickname
 
     if not players:
-        raise ConfigurationError("FACEIT_PLAYERS must contain at least one player.")
+        raise ConfigurationError("Players file must contain at least one player.")
     return players
 
 
