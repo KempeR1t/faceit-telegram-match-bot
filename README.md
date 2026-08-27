@@ -101,7 +101,7 @@ unset TELEGRAM_BOT_TOKEN
 ## Установка
 
 ```bash
-git clone https://github.com/OWNER/REPOSITORY.git faceit_bot
+git clone https://github.com/KempeR1t/faceit-telegram-match-bot.git faceit_bot
 cd faceit_bot
 
 python3 -m venv faceit_env
