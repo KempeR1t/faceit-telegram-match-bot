@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -492,7 +492,6 @@ class FlareSolverrClient:
         self._max_timeout_ms = max_timeout_ms
         self._api_timeout = max(60.0, max_timeout_ms / 1000.0 + 30.0)
         self._session_id: str | None = None
-        self._warmed_up = False
 
     def _api_call(
         self,
@@ -603,23 +602,26 @@ class FlareSolverrClient:
     def match_ratings(
         self, match_id: str, game_id: str
     ) -> dict[str, FaceitRating]:
-        if not self._warmed_up:
-            warmup = self._get_solution(
-                f"{FACEIT_WEB_BASE}/", operation="FACEIT warm-up"
-            )
-            if warmup is None:
-                self._destroy_session()
-                return {}
-            self._warmed_up = True
-
         scoreboard_url = (
             f"{FACEIT_WEB_BASE}/api/statistics/v1/"
             f"{quote(game_id, safe='-_')}/matches/"
             f"{quote(match_id, safe='-')}/match-rounds/1/scoreboard-summary"
         )
-        solution = self._get_solution(
-            scoreboard_url, operation="FACEIT scoreboard lookup"
-        )
+        solution: dict[str, Any] | None = None
+        for attempt in range(1, 3):
+            solution = self._get_solution(
+                scoreboard_url,
+                operation=f"FACEIT scoreboard lookup (attempt {attempt}/2)",
+            )
+            if solution is not None:
+                break
+            if attempt == 1:
+                LOGGER.warning(
+                    "FACEIT scoreboard lookup failed; retrying in 5 seconds "
+                    "without replacing the FlareSolverr session."
+                )
+                time.sleep(5.0)
+
         if solution is None:
             self._destroy_session()
             return {}
@@ -639,7 +641,6 @@ class FlareSolverrClient:
     def _destroy_session(self) -> None:
         session_id = self._session_id
         self._session_id = None
-        self._warmed_up = False
         if not session_id:
             return
 

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from bot import (
@@ -372,13 +373,6 @@ class FlareSolverrClientTests(unittest.TestCase):
                     200,
                     {
                         "status": "ok",
-                        "solution": {"status": 200, "response": "<html></html>"},
-                    },
-                ),
-                FakeResponse(
-                    200,
-                    {
-                        "status": "ok",
                         "solution": {
                             "status": 200,
                             "response": json.dumps(scoreboard),
@@ -399,10 +393,68 @@ class FlareSolverrClientTests(unittest.TestCase):
         commands = [request["json"]["cmd"] for request in session.requests]
         self.assertEqual(
             commands,
-            ["sessions.create", "request.get", "request.get", "sessions.destroy"],
+            ["sessions.create", "request.get", "sessions.destroy"],
         )
-        self.assertEqual(session.requests[1]["json"]["url"], "https://www.faceit.com/")
-        self.assertIn("scoreboard-summary", session.requests[2]["json"]["url"])
+        self.assertIn("scoreboard-summary", session.requests[1]["json"]["url"])
+
+    def test_retries_http_500_in_the_same_session(self) -> None:
+        scoreboard = {
+            "payload": {
+                "cs2": {
+                    "teams": [
+                        {
+                            "players": [
+                                {
+                                    "player_id": PLAYER_ID,
+                                    "stats": {
+                                        "faceit_rating": 1.5522096,
+                                        "faceit_rating_swing": 0.07237932,
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        session = FakeHTTPSession(
+            [
+                FakeResponse(200, {"status": "ok", "session": "test-session"}),
+                FakeResponse(
+                    500,
+                    {
+                        "status": "error",
+                        "message": "Error solving the challenge. Timeout.",
+                    },
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "status": "ok",
+                        "solution": {
+                            "status": 200,
+                            "response": json.dumps(scoreboard),
+                        },
+                    },
+                ),
+                FakeResponse(200, {"status": "ok", "message": "removed"}),
+            ]
+        )
+        client = FlareSolverrClient(session, "http://127.0.0.1:8191/v1", 120000)
+
+        with patch("bot.time.sleep") as sleep:
+            ratings = client.match_ratings("1-test-match", "cs2")
+        client.close()
+
+        self.assertEqual(
+            ratings[PLAYER_ID], FaceitRating(rating=1.5522096, swing=0.07237932)
+        )
+        self.assertEqual(sleep.call_args.args, (5.0,))
+        first_request = session.requests[1]["json"]
+        second_request = session.requests[2]["json"]
+        self.assertEqual(first_request["session"], "test-session")
+        self.assertEqual(second_request["session"], "test-session")
+        self.assertEqual(first_request["url"], second_request["url"])
 
     def test_http_500_returns_no_ratings_and_cleans_up(self) -> None:
         session = FakeHTTPSession(
@@ -418,17 +470,27 @@ class FlareSolverrClientTests(unittest.TestCase):
                         "message": "Error solving the challenge. Timeout.",
                     },
                 ),
+                FakeResponse(
+                    500,
+                    {
+                        "status": "error",
+                        "message": "Error solving the challenge. Timeout.",
+                    },
+                ),
                 FakeResponse(200, {"status": "ok", "message": "removed"}),
             ]
         )
         client = FlareSolverrClient(session, "http://127.0.0.1:8191/v1", 120000)
 
-        self.assertEqual(client.match_ratings("1-test-match", "cs2"), {})
+        with patch("bot.time.sleep") as sleep:
+            self.assertEqual(client.match_ratings("1-test-match", "cs2"), {})
         client.close()
 
+        self.assertEqual(sleep.call_args.args, (5.0,))
         commands = [request["json"]["cmd"] for request in session.requests]
         self.assertEqual(
-            commands, ["sessions.create", "request.get", "sessions.destroy"]
+            commands,
+            ["sessions.create", "request.get", "request.get", "sessions.destroy"],
         )
 
 
