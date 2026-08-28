@@ -1,7 +1,8 @@
 # FACEIT Match Bot
 
-Python-бот для отслеживания завершённых матчей FACEIT. Бот получает статистику
-указанных игроков через FACEIT Data API и отправляет сводку в Telegram.
+Python-бот для отслеживания завершённых матчей FACEIT. Бот получает основную
+статистику через FACEIT Data API, дополняет её Rating и Swing через локальный
+FlareSolverr и отправляет сводку в Telegram.
 
 Один запуск `bot.py` выполняет одну проверку и завершается. Для регулярной
 работы проект можно запускать через cron, например раз в 15 минут.
@@ -10,7 +11,7 @@ Python-бот для отслеживания завершённых матче�
 
 - отслеживание нескольких FACEIT-игроков;
 - одно уведомление для игроков, участвовавших в одном матче;
-- карта, счёт, длительность, результат, K/D, ADR и MVP;
+- карта, счёт, длительность, результат, Rating, Swing, K/D, ADR и MVP;
 - защита от повторных уведомлений через `last_matches.json`;
 - повторная попытка на следующем запуске, если Telegram не принял сообщение;
 - секреты через переменные окружения, список игроков в отдельном JSON-файле;
@@ -39,6 +40,7 @@ Python-бот для отслеживания завершённых матче�
 - FACEIT server-side API key;
 - Telegram-бот;
 - FACEIT player ID отслеживаемых игроков.
+- локальный FlareSolverr — для необязательных полей Rating и Swing.
 
 ## Получение FACEIT API key
 
@@ -113,6 +115,73 @@ faceit_env/bin/python3 -m pip install --upgrade pip
 faceit_env/bin/python3 -m pip install -r requirements.txt
 ```
 
+## FlareSolverr для Rating и Swing
+
+`faceit_rating` и `faceit_rating_swing` отсутствуют в публичном FACEIT Data
+API. Бот получает их из scoreboard-summary через локальный FlareSolverr.
+
+### Установка Docker на Ubuntu 24.04
+
+Если Docker уже установлен, этот шаг можно пропустить. Для установки версии из
+репозитория Ubuntu достаточно выполнить:
+
+```bash
+sudo apt update
+sudo apt install -y docker.io curl
+sudo systemctl enable --now docker
+sudo docker version
+```
+
+Отдельный системный пользователь для FlareSolverr или бота не нужен. Команды
+управления Docker выполняются через `sudo`, а бот продолжает запускаться от
+обычного текущего пользователя.
+
+### Запуск FlareSolverr
+
+Контейнер публикует API только на `127.0.0.1`, поэтому порт 8191 недоступен из
+интернета:
+
+```bash
+sudo docker run -d \
+  --name=flaresolverr \
+  -p 127.0.0.1:8191:8191 \
+  -e LOG_LEVEL=info \
+  --restart unless-stopped \
+  ghcr.io/flaresolverr/flaresolverr:v3.5.0
+```
+
+Параметр `--restart unless-stopped` автоматически поднимет контейнер после
+перезагрузки VPS. Если контейнер с таким именем уже создан, повторять
+`docker run` не нужно — достаточно запустить его:
+
+```bash
+sudo docker start flaresolverr
+```
+
+Проверка API, состояния и последних логов:
+
+```bash
+curl -fsS http://127.0.0.1:8191/ | python3 -m json.tool
+sudo docker ps --filter name=flaresolverr
+sudo docker logs --tail 100 flaresolverr
+```
+
+В ответе первой команды должно быть сообщение `FlareSolverr is ready!`.
+Перезапустить сервис вручную можно командой
+`sudo docker restart flaresolverr`.
+
+Для обработки новых матчей бот создаёт уникальную браузерную сессию, сначала
+открывает главную страницу FACEIT, затем запрашивает scoreboard-summary и после
+работы удаляет только свою сессию. Строка дополнительной статистики выводится
+над K/D; отрицательный Swing отмечается красным индикатором:
+
+```text
+• Rating: 1.07 | 🔴 Swing: -0.71%
+```
+
+Если Cloudflare не пройден, FlareSolverr недоступен или ответ не содержит
+нужных полей, уведомление всё равно будет отправлено — без Rating и Swing.
+
 ## Настройка
 
 Создать локальный файл конфигурации:
@@ -138,6 +207,9 @@ FACEIT_GAME=cs2
 APP_TIMEZONE=Europe/Moscow
 STATE_FILE=last_matches.json
 REQUEST_TIMEOUT_SECONDS=15
+FLARESOLVERR_ENABLED=true
+FLARESOLVERR_URL=http://127.0.0.1:8191/v1
+FLARESOLVERR_MAX_TIMEOUT_MS=120000
 NOTIFY_ON_FIRST_RUN=false
 LOG_LEVEL=INFO
 ```
@@ -169,6 +241,9 @@ LOG_LEVEL=INFO
 | `APP_TIMEZONE` | нет | часовой пояс, по умолчанию `Europe/Moscow` |
 | `STATE_FILE` | нет | файл состояния, по умолчанию `last_matches.json` |
 | `REQUEST_TIMEOUT_SECONDS` | нет | HTTP-таймаут, по умолчанию 15 секунд |
+| `FLARESOLVERR_ENABLED` | нет | добавлять Rating и Swing через FlareSolverr, по умолчанию `true` |
+| `FLARESOLVERR_URL` | нет | адрес API FlareSolverr, по умолчанию `http://127.0.0.1:8191/v1` |
+| `FLARESOLVERR_MAX_TIMEOUT_MS` | нет | ожидание решения Cloudflare, по умолчанию 120000 мс |
 | `NOTIFY_ON_FIRST_RUN` | нет | отправлять ли последний матч при первом запуске |
 | `LOG_LEVEL` | нет | `DEBUG`, `INFO`, `WARNING`, `ERROR` или `CRITICAL` |
 
@@ -292,6 +367,12 @@ sh -n run_bot.sh
 - `HTTP 403` от FACEIT — ключ отключён либо запрос запрещён настройками
   приложения.
 - `HTTP 429` — превышен лимит API; бот повторит GET-запрос с задержкой.
+- `FlareSolverr failed ... Timeout` — Cloudflare не удалось пройти за заданное
+  время; сообщение будет отправлено без Rating и Swing.
+- FlareSolverr не используется — проверить `FLARESOLVERR_ENABLED`, адрес
+  `FLARESOLVERR_URL` и состояние контейнера командами
+  `sudo docker ps --filter name=flaresolverr` и
+  `sudo docker logs --tail 100 flaresolverr`.
 - Telegram не отправляет сообщения — проверить токен, chat ID и наличие бота в
   целевом чате.
 - `No chats found` — отправить боту новое сообщение или команду и повторить

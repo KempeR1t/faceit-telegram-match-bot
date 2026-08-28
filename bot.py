@@ -11,16 +11,18 @@ import argparse
 import html
 import json
 import logging
+import math
 import os
 import re
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote
-from uuid import UUID
+from typing import Any, Protocol
+from urllib.parse import quote, urlsplit
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
@@ -28,9 +30,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
+FACEIT_WEB_BASE = "https://www.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 LOGGER = logging.getLogger("faceit_match_bot")
 
@@ -54,6 +57,9 @@ class Config:
     timezone_name: str
     state_file: Path
     request_timeout: float
+    flaresolverr_enabled: bool
+    flaresolverr_url: str
+    flaresolverr_max_timeout_ms: int
     notify_on_first_run: bool
     log_level: str
 
@@ -95,6 +101,18 @@ class Config:
         request_timeout = parse_float_env(
             "REQUEST_TIMEOUT_SECONDS", default=15.0, minimum=1.0, maximum=120.0
         )
+        flaresolverr_enabled = parse_bool_env(
+            "FLARESOLVERR_ENABLED", default=True
+        )
+        flaresolverr_url = normalize_flaresolverr_url(
+            os.getenv("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1")
+        )
+        flaresolverr_max_timeout_ms = parse_int_env(
+            "FLARESOLVERR_MAX_TIMEOUT_MS",
+            default=120000,
+            minimum=1000,
+            maximum=300000,
+        )
         notify_on_first_run = parse_bool_env("NOTIFY_ON_FIRST_RUN", default=False)
 
         log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
@@ -113,6 +131,9 @@ class Config:
             timezone_name=timezone_name,
             state_file=state_file,
             request_timeout=request_timeout,
+            flaresolverr_enabled=flaresolverr_enabled,
+            flaresolverr_url=flaresolverr_url,
+            flaresolverr_max_timeout_ms=flaresolverr_max_timeout_ms,
             notify_on_first_run=notify_on_first_run,
             log_level=log_level,
         )
@@ -122,6 +143,18 @@ class Config:
 class LatestMatchResult:
     ok: bool
     match_id: str | None
+
+
+@dataclass(frozen=True)
+class FaceitRating:
+    rating: float
+    swing: float
+
+
+class RatingProvider(Protocol):
+    def match_ratings(
+        self, match_id: str, game_id: str
+    ) -> dict[str, FaceitRating]: ...
 
 
 def required_env(name: str) -> str:
@@ -232,6 +265,42 @@ def parse_float_env(
     return value
 
 
+def parse_int_env(
+    name: str, *, default: int, minimum: int, maximum: int
+) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer.") from exc
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(
+            f"{name} must be between {minimum} and {maximum}."
+        )
+    return value
+
+
+def normalize_flaresolverr_url(raw_value: str) -> str:
+    endpoint = raw_value.strip().rstrip("/")
+    if not endpoint:
+        raise ConfigurationError("FLARESOLVERR_URL must not be empty.")
+    if not endpoint.endswith("/v1"):
+        endpoint += "/v1"
+
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigurationError(
+            "FLARESOLVERR_URL must be a valid http:// or https:// URL."
+        )
+    if parsed.query or parsed.fragment:
+        raise ConfigurationError(
+            "FLARESOLVERR_URL must not contain a query string or fragment."
+        )
+    return endpoint
+
+
 def build_http_session() -> requests.Session:
     retry = Retry(
         total=3,
@@ -335,6 +404,253 @@ class FaceitClient:
             params=None,
             operation="match statistics lookup",
         )
+
+
+def extract_faceit_ratings(
+    payload: dict[str, Any], game_id: str
+) -> dict[str, FaceitRating]:
+    """Extract per-player FACEIT 2.0 rating fields from scoreboard-summary."""
+    payload_data = payload.get("payload")
+    if not isinstance(payload_data, dict):
+        return {}
+    game_data = payload_data.get(game_id)
+    if not isinstance(game_data, dict):
+        return {}
+    teams = game_data.get("teams")
+    if not isinstance(teams, list):
+        return {}
+
+    ratings: dict[str, FaceitRating] = {}
+    for team in teams:
+        if not isinstance(team, dict):
+            continue
+        team_players = team.get("players")
+        if not isinstance(team_players, list):
+            continue
+        for player in team_players:
+            if not isinstance(player, dict):
+                continue
+            try:
+                player_id = str(UUID(str(player.get("player_id", "")).strip()))
+            except ValueError:
+                continue
+
+            stats = player.get("stats")
+            if not isinstance(stats, dict):
+                continue
+            rating = finite_float(stats.get("faceit_rating"))
+            swing = finite_float(stats.get("faceit_rating_swing"))
+            if rating is None or swing is None:
+                continue
+            ratings[player_id] = FaceitRating(rating=rating, swing=swing)
+    return ratings
+
+
+def finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def decode_flaresolverr_json(body: Any) -> dict[str, Any] | None:
+    if isinstance(body, dict):
+        return body
+    if not isinstance(body, str) or not body.strip():
+        return None
+
+    document = body.strip()
+    pre_match = re.search(
+        r"<pre(?:\s[^>]*)?>(.*?)</pre>",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if pre_match:
+        document = html.unescape(pre_match.group(1))
+
+    try:
+        payload = json.loads(document)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+class FlareSolverrClient:
+    """Fetch optional FACEIT scoreboard data through a private FlareSolverr."""
+
+    def __init__(
+        self,
+        session: requests.Session,
+        endpoint: str,
+        max_timeout_ms: int,
+    ) -> None:
+        self._session = session
+        self._endpoint = endpoint
+        self._max_timeout_ms = max_timeout_ms
+        self._api_timeout = max(60.0, max_timeout_ms / 1000.0 + 30.0)
+        self._session_id: str | None = None
+        self._warmed_up = False
+
+    def _api_call(
+        self,
+        payload: dict[str, Any],
+        *,
+        operation: str,
+        read_timeout: float | None = None,
+    ) -> dict[str, Any] | None:
+        LOGGER.info("FlareSolverr: %s started.", operation)
+        started = time.monotonic()
+        try:
+            response = self._session.post(
+                self._endpoint,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=(10, read_timeout or self._api_timeout),
+            )
+        except requests.RequestException as exc:
+            LOGGER.warning(
+                "FlareSolverr request failed during %s after %.1fs (%s).",
+                operation,
+                time.monotonic() - started,
+                type(exc).__name__,
+            )
+            return None
+
+        elapsed = time.monotonic() - started
+        try:
+            result = response.json()
+        except ValueError:
+            LOGGER.warning(
+                "FlareSolverr returned invalid JSON during %s: HTTP %s in %.1fs.",
+                operation,
+                response.status_code,
+                elapsed,
+            )
+            return None
+
+        if not isinstance(result, dict):
+            LOGGER.warning(
+                "FlareSolverr returned an unexpected payload during %s.", operation
+            )
+            return None
+
+        if response.status_code != 200 or result.get("status") != "ok":
+            message = " ".join(str(result.get("message", "unknown error")).split())
+            LOGGER.warning(
+                "FlareSolverr failed during %s: HTTP %s in %.1fs, message=%s.",
+                operation,
+                response.status_code,
+                elapsed,
+                message[:300],
+            )
+            return None
+
+        LOGGER.info("FlareSolverr: %s completed in %.1fs.", operation, elapsed)
+        return result
+
+    def _ensure_session(self) -> bool:
+        if self._session_id:
+            return True
+
+        requested_id = f"faceit-bot-{os.getpid()}-{uuid4().hex[:8]}"
+        result = self._api_call(
+            {"cmd": "sessions.create", "session": requested_id},
+            operation="session creation",
+            read_timeout=45.0,
+        )
+        if result is None:
+            return False
+
+        self._session_id = str(result.get("session") or requested_id)
+        LOGGER.info("Created a private FlareSolverr session for FACEIT.")
+        return True
+
+    def _get_solution(
+        self, url: str, *, operation: str
+    ) -> dict[str, Any] | None:
+        if not self._ensure_session():
+            return None
+
+        result = self._api_call(
+            {
+                "cmd": "request.get",
+                "session": self._session_id,
+                "session_ttl_minutes": 10,
+                "url": url,
+                "maxTimeout": self._max_timeout_ms,
+            },
+            operation=operation,
+        )
+        if result is None:
+            return None
+
+        solution = result.get("solution")
+        if not isinstance(solution, dict):
+            LOGGER.warning("FlareSolverr returned no solution during %s.", operation)
+            return None
+        if int(finite_float(solution.get("status")) or 0) != 200:
+            LOGGER.warning(
+                "FACEIT returned HTTP %s through FlareSolverr during %s.",
+                solution.get("status"),
+                operation,
+            )
+            return None
+        return solution
+
+    def match_ratings(
+        self, match_id: str, game_id: str
+    ) -> dict[str, FaceitRating]:
+        if not self._warmed_up:
+            warmup = self._get_solution(
+                f"{FACEIT_WEB_BASE}/", operation="FACEIT warm-up"
+            )
+            if warmup is None:
+                self._destroy_session()
+                return {}
+            self._warmed_up = True
+
+        scoreboard_url = (
+            f"{FACEIT_WEB_BASE}/api/statistics/v1/"
+            f"{quote(game_id, safe='-_')}/matches/"
+            f"{quote(match_id, safe='-')}/match-rounds/1/scoreboard-summary"
+        )
+        solution = self._get_solution(
+            scoreboard_url, operation="FACEIT scoreboard lookup"
+        )
+        if solution is None:
+            self._destroy_session()
+            return {}
+
+        payload = decode_flaresolverr_json(solution.get("response"))
+        if payload is None:
+            LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
+            return {}
+
+        ratings = extract_faceit_ratings(payload, game_id)
+        if ratings:
+            LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s).", len(ratings))
+        else:
+            LOGGER.warning("FACEIT scoreboard response contains no Rating data.")
+        return ratings
+
+    def _destroy_session(self) -> None:
+        session_id = self._session_id
+        self._session_id = None
+        self._warmed_up = False
+        if not session_id:
+            return
+
+        self._api_call(
+            {"cmd": "sessions.destroy", "session": session_id},
+            operation="session cleanup",
+            read_timeout=45.0,
+        )
+
+    def close(self) -> None:
+        self._destroy_session()
 
 
 class TelegramClient:
@@ -467,6 +783,19 @@ def escaped(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
+def format_faceit_rating(rating: FaceitRating | None) -> str:
+    if rating is None:
+        return ""
+    swing_percent = rating.swing * 100
+    if round(swing_percent, 2) == 0:
+        swing_percent = 0.0
+    negative_marker = "🔴 " if swing_percent < 0 else ""
+    return (
+        f"• Rating: <code>{rating.rating:.2f}</code> | "
+        f"{negative_marker}Swing: <code>{swing_percent:+.2f}%</code>\n"
+    )
+
+
 def build_message(
     match_id: str,
     match_details: dict[str, Any],
@@ -474,6 +803,7 @@ def build_message(
     players: dict[str, str],
     game_id: str,
     app_timezone: ZoneInfo,
+    faceit_ratings: dict[str, FaceitRating] | None = None,
 ) -> str | None:
     rounds = stats_data.get("rounds")
     if not isinstance(rounds, list) or not rounds or not isinstance(rounds[0], dict):
@@ -534,10 +864,14 @@ def build_message(
             if not isinstance(player_stats, dict):
                 player_stats = {}
             nickname = escaped(players[player_id])
+            rating_line = format_faceit_rating(
+                (faceit_ratings or {}).get(player_id)
+            )
 
             player_blocks.append(
                 "\n"
                 f"👤 <b>{nickname}</b> — {result_text}\n"
+                f"{rating_line}"
                 f"• Kills: <code>{escaped(player_stats.get('Kills', '0'))}</code> | "
                 f"Deaths: <code>{escaped(player_stats.get('Deaths', '0'))}</code> | "
                 f"K/D: <code>{escaped(player_stats.get('K/D Ratio', '0.0'))}</code>\n"
@@ -565,7 +899,10 @@ def build_message(
 
 
 def run_once(
-    config: Config, faceit: FaceitClient, telegram: TelegramClient
+    config: Config,
+    faceit: FaceitClient,
+    telegram: TelegramClient,
+    flaresolverr: RatingProvider | None = None,
 ) -> int:
     state, is_new_state_file = load_state(config.state_file)
     original_state = dict(state)
@@ -618,6 +955,19 @@ def run_once(
             had_error = True
             continue
 
+        faceit_ratings: dict[str, FaceitRating] = {}
+        if flaresolverr is not None:
+            try:
+                faceit_ratings = flaresolverr.match_ratings(
+                    match_id, config.game_id
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Optional FACEIT Rating lookup failed unexpectedly (%s); "
+                    "the notification will be sent without Rating and Swing.",
+                    type(exc).__name__,
+                )
+
         message = build_message(
             match_id,
             match_details,
@@ -625,6 +975,7 @@ def run_once(
             config.players,
             config.game_id,
             config.timezone,
+            faceit_ratings,
         )
         if message is None:
             had_error = True
@@ -684,15 +1035,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check_config:
         LOGGER.info(
-            "Configuration is valid: %s player(s), game=%s, timezone=%s, state=%s.",
+            "Configuration is valid: %s player(s), game=%s, timezone=%s, "
+            "state=%s, flaresolverr=%s.",
             len(config.players),
             config.game_id,
             config.timezone_name,
             config.state_file,
+            "enabled" if config.flaresolverr_enabled else "disabled",
         )
         return 0
 
     session = build_http_session()
+    flaresolverr: FlareSolverrClient | None = None
     try:
         telegram = TelegramClient(
             session,
@@ -710,11 +1064,25 @@ def main(argv: list[str] | None = None) -> int:
         faceit = FaceitClient(
             session, config.faceit_api_key, config.request_timeout
         )
-        return run_once(config, faceit, telegram)
+        if config.flaresolverr_enabled:
+            flaresolverr = FlareSolverrClient(
+                session,
+                config.flaresolverr_url,
+                config.flaresolverr_max_timeout_ms,
+            )
+        return run_once(config, faceit, telegram, flaresolverr)
     except StateError as exc:
         LOGGER.error("State error: %s", exc)
         return 2
     finally:
+        if flaresolverr is not None:
+            try:
+                flaresolverr.close()
+            except Exception as exc:
+                LOGGER.warning(
+                    "Could not clean up the private FlareSolverr session (%s).",
+                    type(exc).__name__,
+                )
         session.close()
 
 
