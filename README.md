@@ -155,8 +155,12 @@ sudo docker run -d \
 `docker run` не нужно — достаточно запустить его:
 
 ```bash
+sudo docker update --restart unless-stopped flaresolverr
 sudo docker start flaresolverr
 ```
+
+Первая команда включает автозапуск для уже существующего контейнера без его
+пересоздания.
 
 Проверка API, состояния и последних логов:
 
