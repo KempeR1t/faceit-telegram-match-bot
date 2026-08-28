@@ -331,7 +331,7 @@ class PollingTests(unittest.TestCase):
             message = telegram.messages[0]
             rating_line = (
                 "• Rating: <code>1.55</code> | "
-                "Swing: <code>+7.24%</code>"
+                "🟩▲ Swing: <code>+7.24%</code>"
             )
             self.assertIn(rating_line, message)
             self.assertLess(message.index(rating_line), message.index("• Kills:"))
