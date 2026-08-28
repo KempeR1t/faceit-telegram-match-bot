@@ -104,37 +104,31 @@ unset TELEGRAM_BOT_TOKEN
 - [создание бота](https://core.telegram.org/bots/tutorial)
 - [`getUpdates`](https://core.telegram.org/bots/api#getupdates)
 
-## Установка
+## Подготовка Ubuntu 24.04
+
+Сначала установить системные пакеты. `python3-venv` обязателен для создания
+виртуального окружения `faceit_env`, а `python3-pip` устанавливает необходимые
+компоненты pip:
 
 ```bash
-git clone https://github.com/KempeR1t/faceit-telegram-match-bot.git faceit_bot
-cd faceit_bot
+sudo apt update
+sudo apt install -y \
+  git curl cron docker.io \
+  python3 python3-venv python3-pip
 
-python3 -m venv faceit_env
-faceit_env/bin/python3 -m pip install --upgrade pip
-faceit_env/bin/python3 -m pip install -r requirements.txt
+sudo systemctl enable --now docker cron
+python3 --version
+sudo docker version
 ```
+
+Повторный запуск `apt install` безопасен: уже установленные пакеты будут
+пропущены. Отдельный системный пользователь для FlareSolverr или бота не
+нужен.
 
 ## FlareSolverr для Rating и Swing
 
 `faceit_rating` и `faceit_rating_swing` отсутствуют в публичном FACEIT Data
 API. Бот получает их из scoreboard-summary через локальный FlareSolverr.
-
-### Установка Docker на Ubuntu 24.04
-
-Если Docker уже установлен, этот шаг можно пропустить. Для установки версии из
-репозитория Ubuntu достаточно выполнить:
-
-```bash
-sudo apt update
-sudo apt install -y docker.io curl
-sudo systemctl enable --now docker
-sudo docker version
-```
-
-Отдельный системный пользователь для FlareSolverr или бота не нужен. Команды
-управления Docker выполняются через `sudo`, а бот продолжает запускаться от
-обычного текущего пользователя.
 
 ### Запуск FlareSolverr
 
@@ -194,6 +188,24 @@ Swing отмечается компактным красным индикато�
 Если обе попытки не прошли Cloudflare, FlareSolverr недоступен или ответ не
 содержит нужных полей, уведомление всё равно будет отправлено — без Rating и
 Swing.
+
+## Установка бота
+
+Команды выполняются от того обычного пользователя, в чьём `crontab` затем
+будет запускаться бот:
+
+```bash
+cd ~
+git clone https://github.com/KempeR1t/faceit-telegram-match-bot.git faceit_bot
+cd faceit_bot
+
+python3 -m venv faceit_env
+faceit_env/bin/python3 -m pip install --upgrade pip
+faceit_env/bin/python3 -m pip install -r requirements.txt
+
+faceit_env/bin/python3 --version
+faceit_env/bin/python3 -m pip --version
+```
 
 ## Настройка
 
@@ -310,12 +322,19 @@ chmod 755 run_bot.sh
 
 ## Запуск через cron на Ubuntu 24.04
 
-Установить необходимые пакеты и включить cron:
+`cron` уже установлен и включён на этапе подготовки Ubuntu. Проверить сервис:
 
 ```bash
-sudo apt update
-sudo apt install -y cron git python3 python3-venv
-sudo systemctl enable --now cron
+systemctl is-active cron
+```
+
+Подготовить скрипт запуска и файл лога:
+
+```bash
+cd ~/faceit_bot
+chmod 755 run_bot.sh
+touch bot.log
+chmod 600 bot.log
 ```
 
 Открыть пользовательский crontab:
@@ -324,23 +343,29 @@ sudo systemctl enable --now cron
 crontab -e
 ```
 
-Добавить строку, заменив `USERNAME` абсолютным путём к домашнему каталогу:
+Добавить строку:
 
 ```cron
-*/15 * * * * /home/USERNAME/faceit_bot/run_bot.sh >> /home/USERNAME/faceit_bot/bot.log 2>&1
+*/15 * * * * "$HOME/faceit_bot/run_bot.sh" >> "$HOME/faceit_bot/bot.log" 2>&1
 ```
 
-Подготовить файл лога:
+Задание запускается от владельца этого `crontab`; отдельный пользователь не
+нужен. Cron автоматически задаёт `$HOME` для этого пользователя. Скрипт
+`run_bot.sh` сам переходит в каталог проекта, загружает `.env` и запускает
+Python из `faceit_env`.
 
-```bash
-touch bot.log
-chmod 600 bot.log
-```
-
-Проверка:
+Проверить сохранённое задание:
 
 ```bash
 crontab -l
+```
+
+Не дожидаясь следующей четверти часа, можно выполнить ту же команду вручную и
+проверить лог:
+
+```bash
+cd ~/faceit_bot
+./run_bot.sh >> bot.log 2>&1
 tail -n 100 bot.log
 ```
 
