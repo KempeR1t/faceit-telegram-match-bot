@@ -13,6 +13,7 @@ from bot import (
     FaceitRating,
     FlareSolverrClient,
     LatestMatchResult,
+    build_message,
     decode_flaresolverr_json,
     extract_faceit_ratings,
     format_faceit_rating,
@@ -24,6 +25,7 @@ from bot import (
 
 
 PLAYER_ID = "11111111-1111-4111-8111-111111111111"
+SECOND_PLAYER_ID = "22222222-2222-4222-8222-222222222222"
 
 
 class FakeFaceit:
@@ -217,7 +219,60 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(
             line,
             "• Rating: <code>1.07</code> | "
-            "🔴 Swing: <code>-0.71%</code>\n",
+            "🔻 Swing: <code>-0.71%</code>\n",
+        )
+
+    def test_match_result_uses_first_configured_player_and_is_shown_once(self) -> None:
+        match_details = {
+            "started_at": 1_700_000_000,
+            "finished_at": 1_700_001_000,
+        }
+        stats_data = {
+            "rounds": [
+                {
+                    "round_stats": {"Map": "de_mirage", "Score": "13 / 10"},
+                    "teams": [
+                        {
+                            "team_stats": {"Team Win": "1"},
+                            "players": [
+                                {
+                                    "player_id": SECOND_PLAYER_ID,
+                                    "player_stats": {},
+                                }
+                            ],
+                        },
+                        {
+                            "team_stats": {"Team Win": "0"},
+                            "players": [
+                                {"player_id": PLAYER_ID, "player_stats": {}}
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+
+        message = build_message(
+            "1-test-match",
+            match_details,
+            stats_data,
+            {PLAYER_ID: "First", SECOND_PLAYER_ID: "Second"},
+            "cs2",
+            ZoneInfo("Europe/Moscow"),
+        )
+
+        self.assertIsNotNone(message)
+        assert message is not None
+        result_line = "🏁 Результат: 🔴 <b>ПОРАЖЕНИЕ</b> 😡"
+        self.assertEqual(message.count("🏁 Результат:"), 1)
+        self.assertIn(result_line, message)
+        self.assertLess(message.index("(длительность:"), message.index(result_line))
+        self.assertLess(message.index(result_line), message.index("👤"))
+        self.assertNotIn("ВЫИГРАЛ", message)
+        self.assertNotIn("ПРОИГРАЛ", message)
+        self.assertIn(
+            'href="https://www.faceit.com/ru/cs2/room/1-test-match/scoreboard"',
+            message,
         )
 
 

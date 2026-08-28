@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -790,7 +790,7 @@ def format_faceit_rating(rating: FaceitRating | None) -> str:
     swing_percent = rating.swing * 100
     if round(swing_percent, 2) == 0:
         swing_percent = 0.0
-    negative_marker = "🔴 " if swing_percent < 0 else ""
+    negative_marker = "🔻 " if swing_percent < 0 else ""
     return (
         f"• Rating: <code>{rating.rating:.2f}</code> | "
         f"{negative_marker}Swing: <code>{swing_percent:+.2f}%</code>\n"
@@ -842,6 +842,7 @@ def build_message(
         return None
 
     player_blocks: list[str] = []
+    tracked_player_wins: dict[str, bool] = {}
     for team in teams:
         if not isinstance(team, dict):
             continue
@@ -849,7 +850,6 @@ def build_message(
         if not isinstance(team_stats, dict):
             team_stats = {}
         is_win = str(team_stats.get("Team Win", "0")) == "1"
-        result_text = "🟢 ВЫИГРАЛ 🎉" if is_win else "🔴 ПРОИГРАЛ 😡"
 
         team_players = team.get("players")
         if not isinstance(team_players, list):
@@ -860,6 +860,7 @@ def build_message(
             player_id = str(player.get("player_id", ""))
             if player_id not in players:
                 continue
+            tracked_player_wins[player_id] = is_win
 
             player_stats = player.get("player_stats")
             if not isinstance(player_stats, dict):
@@ -871,7 +872,7 @@ def build_message(
 
             player_blocks.append(
                 "\n"
-                f"👤 <b>{nickname}</b> — {result_text}\n"
+                f"👤 <b>{nickname}</b>\n"
                 f"{rating_line}"
                 f"• Kills: <code>{escaped(player_stats.get('Kills', '0'))}</code> | "
                 f"Deaths: <code>{escaped(player_stats.get('Deaths', '0'))}</code> | "
@@ -884,9 +885,24 @@ def build_message(
         LOGGER.warning("No configured players were found in the match statistics.")
         return None
 
+    match_is_win = next(
+        (
+            tracked_player_wins[player_id]
+            for player_id in players
+            if player_id in tracked_player_wins
+        ),
+        None,
+    )
+    if match_is_win is None:
+        LOGGER.warning("Could not determine the result for a configured player.")
+        return None
+    match_result = (
+        "🟢 <b>ПОБЕДА</b> 🎉" if match_is_win else "🔴 <b>ПОРАЖЕНИЕ</b> 😡"
+    )
+
     room_url = (
         f"https://www.faceit.com/ru/{quote(game_id, safe='-_')}/room/"
-        f"{quote(match_id, safe='-')}"
+        f"{quote(match_id, safe='-')}/scoreboard"
     )
     return (
         "🎮 <b>Матч на FACEIT завершён!</b>\n"
@@ -894,6 +910,7 @@ def build_message(
         f"📊 Счёт: <code>{escaped(match_score)}</code>\n"
         f"⏱ Время матча: <code>{escaped(start_text)}–{escaped(end_text)}</code> "
         f"(длительность: <code>{escaped(duration_text)}</code>)\n"
+        f"🏁 Результат: {match_result}\n"
         f"{''.join(player_blocks)}\n"
         f"🔗 <a href=\"{escaped(room_url)}\">Открыть комнату матча</a>"
     )
