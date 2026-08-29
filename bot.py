@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -902,7 +902,7 @@ def format_faceit_rating(rating: FaceitRating | None) -> str:
     if swing_percent < 0:
         swing_marker = "🔻 "
     elif swing_percent > 0:
-        swing_marker = "🟩▲ "
+        swing_marker = "💚 "
     else:
         swing_marker = ""
     return (
