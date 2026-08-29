@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -514,16 +514,21 @@ def decode_flaresolverr_json(body: Any) -> dict[str, Any] | None:
 class FlareSolverrClient:
     """Fetch optional FACEIT scoreboard data through a private FlareSolverr."""
 
+    SESSION_PREFIX = "faceit-bot-"
+
     def __init__(
         self,
         session: requests.Session,
         endpoint: str,
         max_timeout_ms: int,
+        cleanup_stale_sessions: bool = False,
     ) -> None:
         self._session = session
         self._endpoint = endpoint
         self._max_timeout_ms = max_timeout_ms
         self._api_timeout = max(60.0, max_timeout_ms / 1000.0 + 30.0)
+        self._cleanup_stale_sessions = cleanup_stale_sessions
+        self._session_inventory_checked = False
         self._session_id: str | None = None
 
     def _api_call(
@@ -583,17 +588,79 @@ class FlareSolverrClient:
         LOGGER.info("FlareSolverr: %s completed in %.1fs.", operation, elapsed)
         return result
 
+    def _list_sessions(self) -> list[str] | None:
+        result = self._api_call(
+            {"cmd": "sessions.list"},
+            operation="session inventory",
+            read_timeout=45.0,
+        )
+        if result is None:
+            return None
+
+        sessions = result.get("sessions")
+        if not isinstance(sessions, list):
+            LOGGER.warning("FlareSolverr returned an invalid session inventory.")
+            return None
+        return [session_id for session_id in sessions if isinstance(session_id, str)]
+
+    def _destroy_named_session(self, session_id: str, *, operation: str) -> bool:
+        result = self._api_call(
+            {"cmd": "sessions.destroy", "session": session_id},
+            operation=operation,
+            read_timeout=45.0,
+        )
+        return result is not None
+
+    def _cleanup_owned_sessions(self) -> bool:
+        sessions = self._list_sessions()
+        if sessions is None:
+            return False
+
+        owned_sessions = [
+            session_id
+            for session_id in sessions
+            if session_id.startswith(self.SESSION_PREFIX)
+        ]
+        all_removed = True
+        for session_id in owned_sessions:
+            if not self._destroy_named_session(
+                session_id,
+                operation="stale session cleanup",
+            ):
+                all_removed = False
+
+        LOGGER.info(
+            "FlareSolverr session inventory checked: total=%s, "
+            "owned_stale=%s, prefix=%s.",
+            len(sessions),
+            len(owned_sessions),
+            self.SESSION_PREFIX,
+        )
+        return all_removed
+
     def _ensure_session(self) -> bool:
         if self._session_id:
             return True
 
-        requested_id = f"faceit-bot-{os.getpid()}-{uuid4().hex[:8]}"
+        if self._cleanup_stale_sessions and not self._session_inventory_checked:
+            if not self._cleanup_owned_sessions():
+                LOGGER.warning(
+                    "A new FlareSolverr session will not be created because "
+                    "stale FACEIT sessions could not be inventoried or removed."
+                )
+                return False
+            self._session_inventory_checked = True
+
+        requested_id = f"{self.SESSION_PREFIX}{os.getpid()}-{uuid4().hex[:8]}"
         result = self._api_call(
             {"cmd": "sessions.create", "session": requested_id},
             operation="session creation",
             read_timeout=45.0,
         )
         if result is None:
+            # sessions.create may leave Chrome running even when its API call
+            # fails, so the next attempt must inventory the prefix again.
+            self._session_inventory_checked = False
             return False
 
         self._session_id = str(result.get("session") or requested_id)
@@ -677,14 +744,16 @@ class FlareSolverrClient:
         if not session_id:
             return
 
-        self._api_call(
-            {"cmd": "sessions.destroy", "session": session_id},
+        if not self._destroy_named_session(
+            session_id,
             operation="session cleanup",
-            read_timeout=45.0,
-        )
+        ):
+            self._session_inventory_checked = False
 
     def close(self) -> None:
         self._destroy_session()
+        if self._cleanup_stale_sessions:
+            self._cleanup_owned_sessions()
 
 
 class TelegramClient:
@@ -1134,6 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
                 session,
                 config.flaresolverr_url,
                 config.flaresolverr_max_timeout_ms,
+                cleanup_stale_sessions=True,
             )
         return run_once(config, faceit, telegram, flaresolverr)
     except StateError as exc:
