@@ -14,6 +14,7 @@ FlareSolverr и отправляет сводку в Telegram.
 - карта, счёт, длительность, результат, Rating, Swing, K/D, ADR и MVP;
 - защита от повторных уведомлений через `last_matches.json`;
 - повторная попытка на следующем запуске, если Telegram не принял сообщение;
+- необязательный HTTP/SOCKS5-прокси только для запросов Telegram;
 - секреты через переменные окружения, список игроков в отдельном JSON-файле;
 - таймауты и повторные GET-запросы при временных ошибках FACEIT API;
 - совместимость с Python 3.10+ и Ubuntu 24.04.
@@ -27,6 +28,8 @@ FlareSolverr и отправляет сводку в Telegram.
 ├── requirements.txt
 ├── .env.example
 ├── players.example.json
+├── systemd/
+│   └── telegram-proxy.service.example
 ├── tools/
 │   ├── resolve_faceit_players.py
 │   └── list_telegram_chats.py
@@ -226,6 +229,7 @@ nano players.json
 FACEIT_API_KEY=faceit_api_key
 TELEGRAM_BOT_TOKEN=telegram_bot_token
 TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_PROXY_URL=
 FACEIT_PLAYERS_FILE=players.json
 
 FACEIT_GAME=cs2
@@ -261,6 +265,7 @@ LOG_LEVEL=INFO
 | `FACEIT_API_KEY` | да | server-side API key FACEIT |
 | `TELEGRAM_BOT_TOKEN` | да | токен Telegram-бота |
 | `TELEGRAM_CHAT_ID` | да | ID личного чата, группы или канала |
+| `TELEGRAM_PROXY_URL` | нет | HTTP/SOCKS5-прокси только для Telegram; пустое значение означает прямое подключение |
 | `FACEIT_PLAYERS_FILE` | нет | путь к списку игроков, по умолчанию `players.json` |
 | `FACEIT_GAME` | нет | идентификатор игры, по умолчанию `cs2` |
 | `APP_TIMEZONE` | нет | часовой пояс, по умолчанию `Europe/Moscow` |
@@ -308,6 +313,174 @@ faceit_env/bin/python3 bot.py --test-telegram
 ```
 
 В указанный чат должно прийти тестовое сообщение.
+
+## Опциональный SSH-прокси для Telegram
+
+Этот раздел нужен только тогда, когда VPS с ботом не может подключиться к
+`api.telegram.org`, но имеется другая VPS с рабочим доступом к Telegram. Если
+`TELEGRAM_PROXY_URL` отсутствует или оставлена пустой, бот подключается к
+Telegram напрямую и никаких дополнительных действий не требуется.
+
+Самый простой безопасный вариант — динамический SOCKS5-туннель OpenSSH.
+Локальный SOCKS-порт будет слушать только `127.0.0.1` на VPS с ботом. На VPS
+с доступом к Telegram отдельный прокси-сервер устанавливать не нужно:
+используется уже работающий SSH-сервер.
+
+В командах ниже заменить:
+
+- `SSH_PORT` — порт SSH на VPS с доступом к Telegram;
+- `PROXY_USER` — существующий пользователь этой VPS;
+- `PROXY_VPS_IP` — её IP-адрес.
+
+Все команды, кроме явно оговорённых, выполняются на VPS с ботом.
+
+### Создание ключа и проверка SSH
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/telegram_proxy -C telegram-proxy -N ''
+
+ssh-copy-id \
+  -p SSH_PORT \
+  -i ~/.ssh/telegram_proxy.pub \
+  PROXY_USER@PROXY_VPS_IP
+
+ssh \
+  -p SSH_PORT \
+  -i ~/.ssh/telegram_proxy \
+  PROXY_USER@PROXY_VPS_IP \
+  true
+```
+
+Последняя команда должна завершиться без ошибки. Если вход по паролю на
+удалённой VPS отключён, содержимое `~/.ssh/telegram_proxy.pub` нужно добавить
+в `~/.ssh/authorized_keys` существующего удалённого пользователя вручную.
+Приватный файл `~/.ssh/telegram_proxy` копировать нельзя.
+
+### Ручная проверка туннеля
+
+В первом терминале VPS с ботом запустить:
+
+```bash
+ssh -NT \
+  -p SSH_PORT \
+  -D 127.0.0.1:1080 \
+  -i ~/.ssh/telegram_proxy \
+  -o IdentitiesOnly=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  PROXY_USER@PROXY_VPS_IP
+```
+
+Отсутствие вывода означает, что туннель работает. Во втором терминале:
+
+```bash
+curl \
+  --proxy socks5h://127.0.0.1:1080 \
+  --connect-timeout 10 \
+  --max-time 20 \
+  -o /dev/null \
+  -w 'Telegram HTTP %{http_code}\n' \
+  https://api.telegram.org
+```
+
+Любой HTTP-код, отличный от `000`, подтверждает доступ через прокси. После
+проверки временный туннель обязательно остановить через `Ctrl+C`, иначе он
+займёт порт 1080 и помешает запуску постоянной службы.
+
+### Автозапуск SSH-туннеля
+
+Создать пользовательскую службу:
+
+```bash
+cd ~/faceit_bot
+mkdir -p ~/.config/systemd/user
+cp systemd/telegram-proxy.service.example \
+  ~/.config/systemd/user/telegram-proxy.service
+nano ~/.config/systemd/user/telegram-proxy.service
+```
+
+Содержимое файла, в котором также нужно заменить три значения-заполнителя:
+
+```ini
+[Unit]
+Description=SSH SOCKS proxy for Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -p SSH_PORT -D 127.0.0.1:1080 -i %h/.ssh/telegram_proxy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 PROXY_USER@PROXY_VPS_IP
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+Включить запуск пользовательских служб после загрузки VPS и запустить
+туннель:
+
+```bash
+sudo loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now telegram-proxy.service
+```
+
+Проверка:
+
+```bash
+systemctl --user status telegram-proxy.service --no-pager
+ss -lntp | grep ':1080'
+```
+
+Ожидается статус `active (running)`, а порт должен слушать только на
+`127.0.0.1:1080`.
+
+### Подключение бота к прокси
+
+Добавить в локальный `~/faceit_bot/.env`:
+
+```dotenv
+TELEGRAM_PROXY_URL=socks5h://127.0.0.1:1080
+```
+
+Затем проверить конфигурацию и отправку:
+
+```bash
+cd ~/faceit_bot
+set -a
+. ./.env
+set +a
+
+faceit_env/bin/python3 bot.py --check-config
+faceit_env/bin/python3 bot.py --test-telegram
+```
+
+В проверке конфигурации должно появиться `telegram_proxy=enabled`, а в Telegram
+должно прийти тестовое сообщение. `run_bot.sh` и cron автоматически загружают
+переменную из `.env`.
+
+Поддерживаются адреса с протоколами `http://`, `https://`, `socks5://` и
+`socks5h://`. Для SSH-туннеля рекомендуется `socks5h://`, чтобы имя
+`api.telegram.org` разрешалось на VPS с рабочим доступом.
+
+Настройка применяется только к Telegram. FACEIT Data API и локальный
+FlareSolverr продолжают работать напрямую. Конфликта с FlareSolverr нет:
+обычно он слушает `127.0.0.1:8191`, а SOCKS-туннель — `127.0.0.1:1080` на VPS
+с ботом. На удалённой VPS используется только её существующий SSH-порт.
+
+Диагностика туннеля:
+
+```bash
+journalctl --user -u telegram-proxy.service -n 100 --no-pager
+```
+
+Если служба завершается с кодом `255`, точная причина будет в этой команде.
+Сообщение `Address already in use` означает, что порт 1080 всё ещё занят
+ручным SSH-туннелем.
 
 ## Ручной запуск
 
@@ -413,6 +586,8 @@ sh -n run_bot.sh
   `sudo docker logs --tail 100 flaresolverr`.
 - Telegram не отправляет сообщения — проверить токен, chat ID и наличие бота в
   целевом чате.
+- Telegram недоступен напрямую — проверить `TELEGRAM_PROXY_URL`, статус
+  `telegram-proxy.service` и доступ через `curl --proxy` по инструкции выше.
 - `No chats found` — отправить боту новое сообщение или команду и повторить
   `tools/list_telegram_chats.py`.
 - Ошибка чтения `last_matches.json` — проверить JSON или восстановить файл из

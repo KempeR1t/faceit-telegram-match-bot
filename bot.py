@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -51,6 +51,7 @@ class Config:
     faceit_api_key: str
     telegram_bot_token: str
     telegram_chat_id: str
+    telegram_proxy_url: str | None
     players: dict[str, str]
     game_id: str
     timezone: ZoneInfo
@@ -68,6 +69,9 @@ class Config:
         faceit_api_key = required_env("FACEIT_API_KEY")
         telegram_bot_token = required_env("TELEGRAM_BOT_TOKEN")
         telegram_chat_id = required_env("TELEGRAM_CHAT_ID")
+        telegram_proxy_url = normalize_telegram_proxy_url(
+            os.getenv("TELEGRAM_PROXY_URL", "")
+        )
 
         raw_players_file = os.getenv("FACEIT_PLAYERS_FILE", "players.json").strip()
         if not raw_players_file:
@@ -125,6 +129,7 @@ class Config:
             faceit_api_key=faceit_api_key,
             telegram_bot_token=telegram_bot_token,
             telegram_chat_id=telegram_chat_id,
+            telegram_proxy_url=telegram_proxy_url,
             players=players,
             game_id=game_id,
             timezone=app_timezone,
@@ -299,6 +304,34 @@ def normalize_flaresolverr_url(raw_value: str) -> str:
             "FLARESOLVERR_URL must not contain a query string or fragment."
         )
     return endpoint
+
+
+def normalize_telegram_proxy_url(raw_value: str) -> str | None:
+    proxy_url = raw_value.strip()
+    if not proxy_url:
+        return None
+
+    parsed = urlsplit(proxy_url)
+    if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"}:
+        raise ConfigurationError(
+            "TELEGRAM_PROXY_URL must use http, https, socks5 or socks5h."
+        )
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigurationError(
+            "TELEGRAM_PROXY_URL contains an invalid port."
+        ) from exc
+    if not hostname or port is None or port <= 0:
+        raise ConfigurationError(
+            "TELEGRAM_PROXY_URL must contain a hostname and port."
+        )
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ConfigurationError(
+            "TELEGRAM_PROXY_URL must not contain a path, query or fragment."
+        )
+    return proxy_url
 
 
 def build_http_session() -> requests.Session:
@@ -661,11 +694,13 @@ class TelegramClient:
         bot_token: str,
         chat_id: str,
         request_timeout: float,
+        proxy_url: str | None = None,
     ) -> None:
         self._session = session
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._request_timeout = request_timeout
+        self._proxy_url = proxy_url
 
     def send_message(self, text: str) -> bool:
         # The token is part of the Telegram Bot API URL. Never log this URL or
@@ -678,10 +713,15 @@ class TelegramClient:
             "link_preview_options": {"is_disabled": True},
         }
 
+        request_options: dict[str, Any] = {
+            "json": payload,
+            "timeout": self._request_timeout,
+        }
+        if self._proxy_url is not None:
+            request_options["proxies"] = {"https": self._proxy_url}
+
         try:
-            response = self._session.post(
-                url, json=payload, timeout=self._request_timeout
-            )
+            response = self._session.post(url, **request_options)
         except requests.RequestException as exc:
             LOGGER.error("Telegram request failed (%s).", type(exc).__name__)
             return False
@@ -1059,12 +1099,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_config:
         LOGGER.info(
             "Configuration is valid: %s player(s), game=%s, timezone=%s, "
-            "state=%s, flaresolverr=%s.",
+            "state=%s, flaresolverr=%s, telegram_proxy=%s.",
             len(config.players),
             config.game_id,
             config.timezone_name,
             config.state_file,
             "enabled" if config.flaresolverr_enabled else "disabled",
+            "enabled" if config.telegram_proxy_url else "disabled",
         )
         return 0
 
@@ -1076,6 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
             config.telegram_bot_token,
             config.telegram_chat_id,
             config.request_timeout,
+            config.telegram_proxy_url,
         )
 
         if args.test_telegram:

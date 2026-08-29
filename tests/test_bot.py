@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from bot import (
     FaceitRating,
     FlareSolverrClient,
     LatestMatchResult,
+    TelegramClient,
     build_message,
     decode_flaresolverr_json,
     extract_faceit_ratings,
@@ -20,6 +22,7 @@ from bot import (
     format_duration,
     load_players_file,
     load_state,
+    normalize_telegram_proxy_url,
     run_once,
 )
 
@@ -118,6 +121,7 @@ def make_config(state_file: Path, notify_on_first_run: bool = False) -> Config:
         faceit_api_key="test-faceit-key",
         telegram_bot_token="test-telegram-token",
         telegram_chat_id="123",
+        telegram_proxy_url=None,
         players={PLAYER_ID: "Player<One>"},
         game_id="cs2",
         timezone=ZoneInfo("Europe/Moscow"),
@@ -133,6 +137,48 @@ def make_config(state_file: Path, notify_on_first_run: bool = False) -> Config:
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_config_loads_optional_telegram_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            players_file = Path(temporary_directory) / "players.json"
+            players_file.write_text(
+                json.dumps({PLAYER_ID: "PlayerOne"}), encoding="utf-8"
+            )
+            environment = {
+                "FACEIT_API_KEY": "test-faceit-key",
+                "TELEGRAM_BOT_TOKEN": "test-telegram-token",
+                "TELEGRAM_CHAT_ID": "123",
+                "TELEGRAM_PROXY_URL": "socks5h://127.0.0.1:1080",
+                "FACEIT_PLAYERS_FILE": str(players_file),
+            }
+
+            with patch.dict(os.environ, environment, clear=True):
+                config = Config.from_env()
+
+        self.assertEqual(
+            config.telegram_proxy_url,
+            "socks5h://127.0.0.1:1080",
+        )
+
+    def test_empty_telegram_proxy_is_disabled(self) -> None:
+        self.assertIsNone(normalize_telegram_proxy_url("  "))
+
+    def test_telegram_socks_proxy_is_accepted(self) -> None:
+        proxy_url = "socks5h://127.0.0.1:1080"
+        self.assertEqual(normalize_telegram_proxy_url(proxy_url), proxy_url)
+
+    def test_invalid_telegram_proxy_is_rejected(self) -> None:
+        invalid_values = (
+            "ftp://127.0.0.1:1080",
+            "socks5h://127.0.0.1",
+            "socks5h://127.0.0.1:0",
+            "socks5h://127.0.0.1:70000",
+            "socks5h://127.0.0.1:1080/path",
+        )
+        for proxy_url in invalid_values:
+            with self.subTest(proxy_url=proxy_url):
+                with self.assertRaises(ConfigurationError):
+                    normalize_telegram_proxy_url(proxy_url)
+
     def test_load_players_file_rejects_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             players_file = Path(temporary_directory) / "missing.json"
@@ -391,6 +437,32 @@ class PollingTests(unittest.TestCase):
             self.assertEqual(result, 1)
             state, _ = load_state(state_file)
             self.assertEqual(state[PLAYER_ID], "old-match")
+
+
+class TelegramClientTests(unittest.TestCase):
+    def test_sends_only_telegram_request_through_configured_proxy(self) -> None:
+        session = FakeHTTPSession([FakeResponse(200, {"ok": True})])
+        proxy_url = "socks5h://127.0.0.1:1080"
+        client = TelegramClient(
+            session,
+            "test-token",
+            "123",
+            15,
+            proxy_url,
+        )
+
+        self.assertTrue(client.send_message("test"))
+        self.assertEqual(
+            session.requests[0]["proxies"],
+            {"https": proxy_url},
+        )
+
+    def test_direct_telegram_request_has_no_proxy_option(self) -> None:
+        session = FakeHTTPSession([FakeResponse(200, {"ok": True})])
+        client = TelegramClient(session, "test-token", "123", 15)
+
+        self.assertTrue(client.send_message("test"))
+        self.assertNotIn("proxies", session.requests[0])
 
 
 class FlareSolverrClientTests(unittest.TestCase):

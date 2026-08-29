@@ -23,12 +23,18 @@ def main() -> int:
     if not token:
         print("TELEGRAM_BOT_TOKEN is not set.", file=sys.stderr)
         return 2
+    proxy_url = os.getenv("TELEGRAM_PROXY_URL", "").strip()
+    request_options: dict[str, Any] = {
+        "params": {"limit": 100, "timeout": 0},
+        "timeout": 15,
+    }
+    if proxy_url:
+        request_options["proxies"] = {"https": proxy_url}
 
     try:
         response = requests.get(
             f"https://api.telegram.org/bot{token}/getUpdates",
-            params={"limit": 100, "timeout": 0},
-            timeout=15,
+            **request_options,
         )
     except requests.RequestException as exc:
         # Do not print the raw exception: the request URL contains the bot token.

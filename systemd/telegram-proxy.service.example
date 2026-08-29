@@ -1,0 +1,13 @@
+[Unit]
+Description=SSH SOCKS proxy for Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -p SSH_PORT -D 127.0.0.1:1080 -i %h/.ssh/telegram_proxy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 PROXY_USER@PROXY_VPS_IP
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
