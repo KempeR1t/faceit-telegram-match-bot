@@ -321,6 +321,69 @@ class ConfigurationTests(unittest.TestCase):
             message,
         )
 
+    def test_players_are_sorted_by_rating_with_kd_fallback(self) -> None:
+        match_details = {
+            "started_at": 1_700_000_000,
+            "finished_at": 1_700_001_000,
+        }
+        stats_data = {
+            "rounds": [
+                {
+                    "round_stats": {"Map": "de_mirage", "Score": "13 / 10"},
+                    "teams": [
+                        {
+                            "team_stats": {"Team Win": "1"},
+                            "players": [
+                                {
+                                    "player_id": PLAYER_ID,
+                                    "player_stats": {"K/D Ratio": "2.00"},
+                                },
+                                {
+                                    "player_id": SECOND_PLAYER_ID,
+                                    "player_stats": {"K/D Ratio": "0.80"},
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        players = {PLAYER_ID: "HighKD", SECOND_PLAYER_ID: "HighRating"}
+
+        message_by_rating = build_message(
+            "1-test-match",
+            match_details,
+            stats_data,
+            players,
+            "cs2",
+            ZoneInfo("Europe/Moscow"),
+            {
+                PLAYER_ID: FaceitRating(rating=1.10, swing=0.0),
+                SECOND_PLAYER_ID: FaceitRating(rating=1.50, swing=0.0),
+            },
+        )
+        message_by_kd = build_message(
+            "1-test-match",
+            match_details,
+            stats_data,
+            players,
+            "cs2",
+            ZoneInfo("Europe/Moscow"),
+        )
+
+        self.assertIsNotNone(message_by_rating)
+        self.assertIsNotNone(message_by_kd)
+        assert message_by_rating is not None
+        assert message_by_kd is not None
+        self.assertLess(
+            message_by_rating.index("👤 <b>HighRating</b>"),
+            message_by_rating.index("👤 <b>HighKD</b>"),
+        )
+        self.assertLess(
+            message_by_kd.index("👤 <b>HighKD</b>"),
+            message_by_kd.index("👤 <b>HighRating</b>"),
+        )
+
 
 class PollingTests(unittest.TestCase):
     def test_first_run_creates_baseline_without_sending(self) -> None:

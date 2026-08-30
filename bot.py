@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -995,7 +995,8 @@ def build_message(
         LOGGER.warning("FACEIT match statistics do not contain team data.")
         return None
 
-    player_blocks: list[str] = []
+    player_order = {player_id: index for index, player_id in enumerate(players)}
+    player_blocks: list[tuple[float, int, str]] = []
     tracked_player_wins: dict[str, bool] = {}
     for team in teams:
         if not isinstance(team, dict):
@@ -1020,24 +1021,35 @@ def build_message(
             if not isinstance(player_stats, dict):
                 player_stats = {}
             nickname = escaped(players[player_id])
-            rating_line = format_faceit_rating(
-                (faceit_ratings or {}).get(player_id)
+            player_rating = (faceit_ratings or {}).get(player_id)
+            rating_line = format_faceit_rating(player_rating)
+            kd_value = finite_float(player_stats.get("K/D Ratio"))
+            sort_value = (
+                player_rating.rating
+                if player_rating is not None
+                else (kd_value if kd_value is not None else 0.0)
             )
 
             player_blocks.append(
-                "\n"
-                f"👤 <b>{nickname}</b>\n"
-                f"{rating_line}"
-                f"• Kills: <code>{escaped(player_stats.get('Kills', '0'))}</code> | "
-                f"Deaths: <code>{escaped(player_stats.get('Deaths', '0'))}</code> | "
-                f"K/D: <code>{escaped(player_stats.get('K/D Ratio', '0.0'))}</code>\n"
-                f"• ADR: <code>{escaped(player_stats.get('ADR', '0'))}</code> | "
-                f"MVP: <code>{escaped(player_stats.get('MVPs', '0'))}</code>\n"
+                (
+                    sort_value,
+                    player_order[player_id],
+                    "\n"
+                    f"👤 <b>{nickname}</b>\n"
+                    f"{rating_line}"
+                    f"• Kills: <code>{escaped(player_stats.get('Kills', '0'))}</code> | "
+                    f"Deaths: <code>{escaped(player_stats.get('Deaths', '0'))}</code> | "
+                    f"K/D: <code>{escaped(player_stats.get('K/D Ratio', '0.0'))}</code>\n"
+                    f"• ADR: <code>{escaped(player_stats.get('ADR', '0'))}</code> | "
+                    f"MVP: <code>{escaped(player_stats.get('MVPs', '0'))}</code>\n",
+                )
             )
 
     if not player_blocks:
         LOGGER.warning("No configured players were found in the match statistics.")
         return None
+
+    player_blocks.sort(key=lambda item: (-item[0], item[1]))
 
     match_is_win = next(
         (
@@ -1065,7 +1077,7 @@ def build_message(
         f"⏱ Время матча: <code>{escaped(start_text)}–{escaped(end_text)}</code> "
         f"(длительность: <code>{escaped(duration_text)}</code>)\n"
         f"🏁 Результат: {match_result}\n"
-        f"{''.join(player_blocks)}\n"
+        f"{''.join(block for _, _, block in player_blocks)}\n"
         f"🔗 <a href=\"{escaped(room_url)}\">Открыть комнату матча</a>"
     )
 
