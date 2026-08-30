@@ -337,6 +337,36 @@ class PollingTests(unittest.TestCase):
             state, _ = load_state(state_file)
             self.assertEqual(state[PLAYER_ID], "new-match")
 
+    def test_no_new_match_does_not_contact_flaresolverr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "state.json"
+            state_file.write_text(
+                json.dumps({PLAYER_ID: "current-match"}), encoding="utf-8"
+            )
+            session = FakeHTTPSession([])
+            flaresolverr = FlareSolverrClient(
+                session,
+                "http://127.0.0.1:8191/v1",
+                120000,
+                cleanup_stale_sessions=True,
+            )
+
+            with self.assertLogs("faceit_match_bot", level="INFO") as logs:
+                result = run_once(
+                    make_config(state_file),
+                    FakeFaceit("current-match"),
+                    FakeTelegram(),
+                    flaresolverr,
+                )
+                flaresolverr.close()
+
+            self.assertEqual(result, 0)
+            self.assertEqual(session.requests, [])
+            self.assertEqual(
+                logs.output,
+                ["INFO:faceit_match_bot:No new matches found."],
+            )
+
     def test_new_match_is_sent_and_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             state_file = Path(temporary_directory) / "state.json"
@@ -352,6 +382,56 @@ class PollingTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(len(telegram.messages), 1)
             self.assertIn("Player&lt;One&gt;", telegram.messages[0])
+            state, _ = load_state(state_file)
+            self.assertEqual(state[PLAYER_ID], "new-match")
+
+    def test_match_younger_than_fifteen_minutes_is_deferred(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "state.json"
+            state_file.write_text(
+                json.dumps({PLAYER_ID: "old-match"}), encoding="utf-8"
+            )
+            telegram = FakeTelegram()
+            flaresolverr = FakeFlareSolverr(
+                {PLAYER_ID: FaceitRating(rating=1.5522096, swing=0.07237932)}
+            )
+
+            with patch("bot.time.time", return_value=1_700_001_000 + 14 * 60):
+                result = run_once(
+                    make_config(state_file),
+                    FakeFaceit("new-match"),
+                    telegram,
+                    flaresolverr,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(telegram.messages, [])
+            self.assertEqual(flaresolverr.requests, [])
+            state, _ = load_state(state_file)
+            self.assertEqual(state[PLAYER_ID], "old-match")
+
+    def test_fifteen_minute_old_match_is_processed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "state.json"
+            state_file.write_text(
+                json.dumps({PLAYER_ID: "old-match"}), encoding="utf-8"
+            )
+            telegram = FakeTelegram()
+            flaresolverr = FakeFlareSolverr(
+                {PLAYER_ID: FaceitRating(rating=1.5522096, swing=0.07237932)}
+            )
+
+            with patch("bot.time.time", return_value=1_700_001_000 + 15 * 60):
+                result = run_once(
+                    make_config(state_file),
+                    FakeFaceit("new-match"),
+                    telegram,
+                    flaresolverr,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(telegram.messages), 1)
+            self.assertEqual(flaresolverr.requests, [("new-match", "cs2")])
             state, _ = load_state(state_file)
             self.assertEqual(state[PLAYER_ID], "new-match")
 
@@ -582,6 +662,108 @@ class FlareSolverrClientTests(unittest.TestCase):
         self.assertEqual(first_request["session"], "test-session")
         self.assertEqual(second_request["session"], "test-session")
         self.assertEqual(first_request["url"], second_request["url"])
+
+    def test_waits_in_the_same_session_until_rating_is_ready(self) -> None:
+        empty_scoreboard = {"payload": {"cs2": {"teams": []}}}
+        ready_scoreboard = {
+            "payload": {
+                "cs2": {
+                    "teams": [
+                        {
+                            "players": [
+                                {
+                                    "player_id": PLAYER_ID,
+                                    "stats": {
+                                        "faceit_rating": 1.5522096,
+                                        "faceit_rating_swing": 0.07237932,
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        session = FakeHTTPSession(
+            [
+                FakeResponse(200, {"status": "ok", "session": "test-session"}),
+                FakeResponse(
+                    200,
+                    {
+                        "status": "ok",
+                        "solution": {
+                            "status": 200,
+                            "response": json.dumps(empty_scoreboard),
+                        },
+                    },
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "status": "ok",
+                        "solution": {
+                            "status": 200,
+                            "response": json.dumps(ready_scoreboard),
+                        },
+                    },
+                ),
+                FakeResponse(200, {"status": "ok", "message": "removed"}),
+            ]
+        )
+        client = FlareSolverrClient(session, "http://127.0.0.1:8191/v1", 120000)
+
+        with patch("bot.time.sleep") as sleep:
+            ratings = client.match_ratings("1-test-match", "cs2")
+        client.close()
+
+        self.assertEqual(
+            ratings[PLAYER_ID], FaceitRating(rating=1.5522096, swing=0.07237932)
+        )
+        sleep.assert_called_once_with(60.0)
+        scoreboard_requests = [
+            request["json"]
+            for request in session.requests
+            if request["json"]["cmd"] == "request.get"
+        ]
+        self.assertEqual(len(scoreboard_requests), 2)
+        self.assertEqual(scoreboard_requests[0]["session"], "test-session")
+        self.assertEqual(scoreboard_requests[1]["session"], "test-session")
+        self.assertEqual(
+            scoreboard_requests[0]["url"], scoreboard_requests[1]["url"]
+        )
+
+    def test_stops_waiting_after_ten_empty_scoreboards(self) -> None:
+        empty_scoreboard = {"payload": {"cs2": {"teams": []}}}
+        responses = [
+            FakeResponse(200, {"status": "ok", "session": "test-session"})
+        ]
+        responses.extend(
+            FakeResponse(
+                200,
+                {
+                    "status": "ok",
+                    "solution": {
+                        "status": 200,
+                        "response": json.dumps(empty_scoreboard),
+                    },
+                },
+            )
+            for _ in range(10)
+        )
+        responses.append(FakeResponse(200, {"status": "ok", "message": "removed"}))
+        session = FakeHTTPSession(responses)
+        client = FlareSolverrClient(session, "http://127.0.0.1:8191/v1", 120000)
+
+        with patch("bot.time.sleep") as sleep:
+            self.assertEqual(client.match_ratings("1-test-match", "cs2"), {})
+        client.close()
+
+        self.assertEqual(sleep.call_count, 9)
+        self.assertTrue(
+            all(call.args == (60.0,) for call in sleep.call_args_list)
+        )
+        commands = [request["json"]["cmd"] for request in session.requests]
+        self.assertEqual(commands.count("request.get"), 10)
 
     def test_http_500_returns_no_ratings_and_cleans_up(self) -> None:
         session = FakeHTTPSession(

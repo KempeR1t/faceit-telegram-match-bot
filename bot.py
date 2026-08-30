@@ -30,11 +30,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
+MATCH_PROCESSING_DELAY_SECONDS = 15 * 60
 LOGGER = logging.getLogger("faceit_match_bot")
 
 
@@ -515,6 +516,10 @@ class FlareSolverrClient:
     """Fetch optional FACEIT scoreboard data through a private FlareSolverr."""
 
     SESSION_PREFIX = "faceit-bot-"
+    SCOREBOARD_REQUEST_ATTEMPTS = 2
+    SCOREBOARD_REQUEST_RETRY_SECONDS = 5.0
+    RATING_POLL_ATTEMPTS = 10
+    RATING_POLL_INTERVAL_SECONDS = 60.0
 
     def __init__(
         self,
@@ -529,6 +534,7 @@ class FlareSolverrClient:
         self._api_timeout = max(60.0, max_timeout_ms / 1000.0 + 30.0)
         self._cleanup_stale_sessions = cleanup_stale_sessions
         self._session_inventory_checked = False
+        self._session_creation_attempted = False
         self._session_id: str | None = None
 
     def _api_call(
@@ -652,6 +658,7 @@ class FlareSolverrClient:
             self._session_inventory_checked = True
 
         requested_id = f"{self.SESSION_PREFIX}{os.getpid()}-{uuid4().hex[:8]}"
+        self._session_creation_attempted = True
         result = self._api_call(
             {"cmd": "sessions.create", "session": requested_id},
             operation="session creation",
@@ -699,6 +706,32 @@ class FlareSolverrClient:
             return None
         return solution
 
+    def _get_scoreboard_solution(
+        self,
+        scoreboard_url: str,
+        *,
+        rating_check: int,
+    ) -> dict[str, Any] | None:
+        for request_attempt in range(1, self.SCOREBOARD_REQUEST_ATTEMPTS + 1):
+            solution = self._get_solution(
+                scoreboard_url,
+                operation=(
+                    "FACEIT scoreboard lookup "
+                    f"(Rating check {rating_check}/{self.RATING_POLL_ATTEMPTS}, "
+                    f"request {request_attempt}/{self.SCOREBOARD_REQUEST_ATTEMPTS})"
+                ),
+            )
+            if solution is not None:
+                return solution
+            if request_attempt < self.SCOREBOARD_REQUEST_ATTEMPTS:
+                LOGGER.warning(
+                    "FACEIT scoreboard lookup failed; retrying in %.0f seconds "
+                    "without replacing the FlareSolverr session.",
+                    self.SCOREBOARD_REQUEST_RETRY_SECONDS,
+                )
+                time.sleep(self.SCOREBOARD_REQUEST_RETRY_SECONDS)
+        return None
+
     def match_ratings(
         self, match_id: str, game_id: str
     ) -> dict[str, FaceitRating]:
@@ -707,36 +740,43 @@ class FlareSolverrClient:
             f"{quote(game_id, safe='-_')}/matches/"
             f"{quote(match_id, safe='-')}/match-rounds/1/scoreboard-summary"
         )
-        solution: dict[str, Any] | None = None
-        for attempt in range(1, 3):
-            solution = self._get_solution(
+        for rating_check in range(1, self.RATING_POLL_ATTEMPTS + 1):
+            solution = self._get_scoreboard_solution(
                 scoreboard_url,
-                operation=f"FACEIT scoreboard lookup (attempt {attempt}/2)",
+                rating_check=rating_check,
             )
-            if solution is not None:
-                break
-            if attempt == 1:
-                LOGGER.warning(
-                    "FACEIT scoreboard lookup failed; retrying in 5 seconds "
-                    "without replacing the FlareSolverr session."
+            if solution is None:
+                self._destroy_session()
+                return {}
+
+            payload = decode_flaresolverr_json(solution.get("response"))
+            if payload is None:
+                LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
+                return {}
+
+            ratings = extract_faceit_ratings(payload, game_id)
+            if ratings:
+                LOGGER.info(
+                    "Loaded FACEIT Rating and Swing for %s player(s).", len(ratings)
                 )
-                time.sleep(5.0)
+                return ratings
 
-        if solution is None:
-            self._destroy_session()
-            return {}
+            if rating_check < self.RATING_POLL_ATTEMPTS:
+                LOGGER.info(
+                    "FACEIT Rating and Swing are not ready yet; retrying in "
+                    "%.0f seconds (check %s/%s).",
+                    self.RATING_POLL_INTERVAL_SECONDS,
+                    rating_check,
+                    self.RATING_POLL_ATTEMPTS,
+                )
+                time.sleep(self.RATING_POLL_INTERVAL_SECONDS)
 
-        payload = decode_flaresolverr_json(solution.get("response"))
-        if payload is None:
-            LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
-            return {}
-
-        ratings = extract_faceit_ratings(payload, game_id)
-        if ratings:
-            LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s).", len(ratings))
-        else:
-            LOGGER.warning("FACEIT scoreboard response contains no Rating data.")
-        return ratings
+        LOGGER.warning(
+            "FACEIT scoreboard response contains no Rating data after %s checks; "
+            "the notification will be sent without Rating and Swing.",
+            self.RATING_POLL_ATTEMPTS,
+        )
+        return {}
 
     def _destroy_session(self) -> None:
         session_id = self._session_id
@@ -752,7 +792,7 @@ class FlareSolverrClient:
 
     def close(self) -> None:
         self._destroy_session()
-        if self._cleanup_stale_sessions:
+        if self._cleanup_stale_sessions and self._session_creation_attempted:
             self._cleanup_owned_sessions()
 
 
@@ -1082,8 +1122,27 @@ def run_once(
 
     for match_id in pending_match_ids:
         match_details = faceit.match_details(match_id)
+        if match_details is None:
+            had_error = True
+            continue
+
+        finished_at = finite_float(match_details.get("finished_at"))
+        if finished_at is not None and finished_at > 0:
+            match_age_seconds = max(0.0, time.time() - finished_at)
+            if match_age_seconds < MATCH_PROCESSING_DELAY_SECONDS:
+                remaining_minutes = (
+                    MATCH_PROCESSING_DELAY_SECONDS - match_age_seconds
+                ) / 60
+                LOGGER.info(
+                    "Match %s finished less than 15 minutes ago; processing "
+                    "is deferred for approximately %.1f more minute(s).",
+                    match_id,
+                    remaining_minutes,
+                )
+                continue
+
         stats_data = faceit.match_stats(match_id)
-        if match_details is None or stats_data is None:
+        if stats_data is None:
             had_error = True
             continue
 
