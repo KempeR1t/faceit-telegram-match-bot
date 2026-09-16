@@ -8,6 +8,7 @@ __pycache__/
 *.log
 data/
 last_matches.json
+*.json.lock
 players.json
 .pytest_cache/
 .coverage

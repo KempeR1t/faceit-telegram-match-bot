@@ -8,6 +8,7 @@ to be started periodically by cron.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import html
 import json
 import logging
@@ -30,12 +31,13 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.3.4"
+VERSION = "1.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
-MATCH_PROCESSING_DELAY_SECONDS = 15 * 60
+RATING_UPDATE_WINDOW_SECONDS = 2 * 60 * 60
+PENDING_MESSAGES_KEY = "__pending_messages__"
 LOGGER = logging.getLogger("faceit_match_bot")
 
 
@@ -518,8 +520,6 @@ class FlareSolverrClient:
     SESSION_PREFIX = "faceit-bot-"
     SCOREBOARD_REQUEST_ATTEMPTS = 2
     SCOREBOARD_REQUEST_RETRY_SECONDS = 5.0
-    RATING_POLL_ATTEMPTS = 10
-    RATING_POLL_INTERVAL_SECONDS = 60.0
 
     def __init__(
         self,
@@ -709,16 +709,13 @@ class FlareSolverrClient:
     def _get_scoreboard_solution(
         self,
         scoreboard_url: str,
-        *,
-        rating_check: int,
     ) -> dict[str, Any] | None:
         for request_attempt in range(1, self.SCOREBOARD_REQUEST_ATTEMPTS + 1):
             solution = self._get_solution(
                 scoreboard_url,
                 operation=(
                     "FACEIT scoreboard lookup "
-                    f"(Rating check {rating_check}/{self.RATING_POLL_ATTEMPTS}, "
-                    f"request {request_attempt}/{self.SCOREBOARD_REQUEST_ATTEMPTS})"
+                    f"(request {request_attempt}/{self.SCOREBOARD_REQUEST_ATTEMPTS})"
                 ),
             )
             if solution is not None:
@@ -740,43 +737,17 @@ class FlareSolverrClient:
             f"{quote(game_id, safe='-_')}/matches/"
             f"{quote(match_id, safe='-')}/match-rounds/1/scoreboard-summary"
         )
-        for rating_check in range(1, self.RATING_POLL_ATTEMPTS + 1):
-            solution = self._get_scoreboard_solution(
-                scoreboard_url,
-                rating_check=rating_check,
-            )
-            if solution is None:
-                self._destroy_session()
-                return {}
-
-            payload = decode_flaresolverr_json(solution.get("response"))
-            if payload is None:
-                LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
-                return {}
-
-            ratings = extract_faceit_ratings(payload, game_id)
-            if ratings:
-                LOGGER.info(
-                    "Loaded FACEIT Rating and Swing for %s player(s).", len(ratings)
-                )
-                return ratings
-
-            if rating_check < self.RATING_POLL_ATTEMPTS:
-                LOGGER.info(
-                    "FACEIT Rating and Swing are not ready yet; retrying in "
-                    "%.0f seconds (check %s/%s).",
-                    self.RATING_POLL_INTERVAL_SECONDS,
-                    rating_check,
-                    self.RATING_POLL_ATTEMPTS,
-                )
-                time.sleep(self.RATING_POLL_INTERVAL_SECONDS)
-
-        LOGGER.warning(
-            "FACEIT scoreboard response contains no Rating data after %s checks; "
-            "the notification will be sent without Rating and Swing.",
-            self.RATING_POLL_ATTEMPTS,
-        )
-        return {}
+        solution = self._get_scoreboard_solution(scoreboard_url)
+        if solution is None:
+            self._destroy_session()
+            return {}
+        payload = decode_flaresolverr_json(solution.get("response"))
+        if payload is None:
+            LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
+            return {}
+        ratings = extract_faceit_ratings(payload, game_id)
+        LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s).", len(ratings))
+        return ratings
 
     def _destroy_session(self) -> None:
         session_id = self._session_id
@@ -794,6 +765,7 @@ class FlareSolverrClient:
         self._destroy_session()
         if self._cleanup_stale_sessions and self._session_creation_attempted:
             self._cleanup_owned_sessions()
+        self._session_creation_attempted = False
 
 
 class TelegramClient:
@@ -811,16 +783,36 @@ class TelegramClient:
         self._request_timeout = request_timeout
         self._proxy_url = proxy_url
 
-    def send_message(self, text: str) -> bool:
+    def send_message(self, text: str) -> int | None:
+        result = self._message_request("sendMessage", text)
+        message = result.get("result") if result else None
+        message_id = message.get("message_id") if isinstance(message, dict) else None
+        if type(message_id) is int and message_id > 0:
+            return message_id
+        if result is not None:
+            LOGGER.error("Telegram returned no valid message ID.")
+        return None
+
+    def edit_message(self, message_id: int, text: str, *, chat_id: str) -> bool:
+        return self._message_request(
+            "editMessageText", text, message_id=message_id, chat_id=chat_id
+        ) is not None
+
+    def _message_request(
+        self, method: str, text: str, *, message_id: int | None = None,
+        chat_id: str | None = None,
+    ) -> dict[str, Any] | None:
         # The token is part of the Telegram Bot API URL. Never log this URL or
         # the raw exception message, because either can disclose the token.
-        url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/sendMessage"
+        url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/{method}"
         payload = {
-            "chat_id": self._chat_id,
+            "chat_id": chat_id if chat_id is not None else self._chat_id,
             "text": text,
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": True},
         }
+        if message_id is not None:
+            payload["message_id"] = message_id
 
         request_options: dict[str, Any] = {
             "json": payload,
@@ -833,25 +825,57 @@ class TelegramClient:
             response = self._session.post(url, **request_options)
         except requests.RequestException as exc:
             LOGGER.error("Telegram request failed (%s).", type(exc).__name__)
-            return False
-
-        if response.status_code != 200:
-            LOGGER.error("Telegram returned HTTP %s.", response.status_code)
-            return False
+            return None
 
         try:
             result = response.json()
-        except requests.JSONDecodeError:
+        except ValueError:
             LOGGER.error("Telegram returned invalid JSON.")
+            return None
+
+        # An edit may have succeeded before a previous HTTP response was lost.
+        if (method == "editMessageText" and response.status_code == 400
+                and isinstance(result, dict)
+                and "message is not modified" in str(result.get("description", "")).lower()):
+            return {"ok": True}
+        if response.status_code != 200 or not isinstance(result, dict) or not result.get("ok"):
+            LOGGER.error("Telegram rejected %s (HTTP %s).", method, response.status_code)
+            return None
+        return result
+
+
+def valid_pending_messages(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for match_id, item in value.items():
+        if not isinstance(match_id, str) or not isinstance(item, dict):
             return False
-
-        if not isinstance(result, dict) or not result.get("ok"):
-            LOGGER.error("Telegram rejected the message.")
+        if (type(item.get("message_id")) is not int or item["message_id"] <= 0
+                or finite_float(item.get("sent_at")) is None
+                or not all(isinstance(item.get(key), str) for key in
+                           ("chat_id", "game_id", "timezone", "last_text"))):
             return False
-        return True
+        if not all(isinstance(item.get(key), dict) for key in
+                   ("details", "stats", "players", "ratings")):
+            return False
+        if not item["players"] or not all(
+            isinstance(pid, str) and isinstance(name, str)
+            for pid, name in item["players"].items()
+        ):
+            return False
+        try:
+            ZoneInfo(item["timezone"])
+        except (ValueError, ZoneInfoNotFoundError):
+            return False
+        for pid, rating in item["ratings"].items():
+            if (not isinstance(pid, str) or not isinstance(rating, dict)
+                    or finite_float(rating.get("rating")) is None
+                    or finite_float(rating.get("swing")) is None):
+                return False
+    return True
 
 
-def load_state(state_file: Path) -> tuple[dict[str, str], bool]:
+def load_state(state_file: Path) -> tuple[dict[str, Any], bool]:
     if not state_file.exists():
         return {}, True
 
@@ -864,7 +888,10 @@ def load_state(state_file: Path) -> tuple[dict[str, str], bool]:
         ) from exc
 
     if not isinstance(payload, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
+        isinstance(key, str) and (
+            isinstance(value, str) if key != PENDING_MESSAGES_KEY
+            else valid_pending_messages(value)
+        )
         for key, value in payload.items()
     ):
         raise StateError(f"State file {state_file} has an unexpected format.")
@@ -872,7 +899,7 @@ def load_state(state_file: Path) -> tuple[dict[str, str], bool]:
     return dict(payload), False
 
 
-def save_state(state_file: Path, state: dict[str, str]) -> None:
+def save_state(state_file: Path, state: dict[str, Any]) -> None:
     try:
         state_file.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
@@ -892,7 +919,7 @@ def save_state(state_file: Path, state: dict[str, str]) -> None:
                 file_handle,
                 ensure_ascii=False,
                 indent=2,
-                sort_keys=True,
+                sort_keys=False,
             )
             file_handle.write("\n")
             file_handle.flush()
@@ -959,6 +986,7 @@ def build_message(
     game_id: str,
     app_timezone: ZoneInfo,
     faceit_ratings: dict[str, FaceitRating] | None = None,
+    rating_status: str | None = None,
 ) -> str | None:
     rounds = stats_data.get("rounds")
     if not isinstance(rounds, list) or not rounds or not isinstance(rounds[0], dict):
@@ -1023,6 +1051,8 @@ def build_message(
             nickname = escaped(players[player_id])
             player_rating = (faceit_ratings or {}).get(player_id)
             rating_line = format_faceit_rating(player_rating)
+            if player_rating is None and rating_status:
+                rating_line = f"• {escaped(rating_status)}\n"
             kd_value = finite_float(player_stats.get("K/D Ratio"))
             sort_value = (
                 player_rating.rating
@@ -1082,14 +1112,121 @@ def build_message(
     )
 
 
+def ratings_for_match(
+    provider: RatingProvider | None, match_id: str, game_id: str,
+) -> dict[str, FaceitRating]:
+    if provider is None:
+        return {}
+    try:
+        return provider.match_ratings(match_id, game_id)
+    except Exception as exc:
+        LOGGER.warning("Optional Rating lookup failed (%s).", type(exc).__name__)
+        return {}
+
+
+def tracked_match_players(stats: dict[str, Any], players: dict[str, str]) -> dict[str, str]:
+    rounds = stats.get("rounds")
+    if not isinstance(rounds, list) or not rounds or not isinstance(rounds[0], dict):
+        return {}
+    teams = rounds[0].get("teams")
+    if not isinstance(teams, list):
+        return {}
+    present = set()
+    for team in teams:
+        if not isinstance(team, dict) or not isinstance(team.get("players"), list):
+            continue
+        for player in team["players"]:
+            if isinstance(player, dict):
+                present.add(str(player.get("player_id", "")))
+    return {pid: name for pid, name in players.items() if pid in present}
+
+
+def update_pending_messages(
+    config: Config, state: dict[str, Any], match_ids: list[str],
+    telegram: TelegramClient, provider: RatingProvider | None,
+) -> bool:
+    pending = state.get(PENDING_MESSAGES_KEY, {})
+    success = True
+    for match_id in match_ids:
+        item = pending[match_id]
+        expired = time.time() >= float(item["sent_at"]) + RATING_UPDATE_WINDOW_SECONDS
+        ratings = {
+            pid: FaceitRating(float(values["rating"]), float(values["swing"]))
+            for pid, values in item["ratings"].items()
+        }
+        if not expired and not all(pid in ratings for pid in item["players"]):
+            ratings.update(ratings_for_match(provider, match_id, item["game_id"]))
+        complete = all(pid in ratings for pid in item["players"])
+        status = None if complete else (
+            "Rating и Swing недоступны" if expired else "⏳ Rating и Swing рассчитываются"
+        )
+        text = build_message(
+            match_id, item["details"], item["stats"], item["players"],
+            item["game_id"], ZoneInfo(item["timezone"]), ratings, status,
+        )
+        if text is None:
+            raise StateError(f"Cannot rebuild pending message for match {match_id}.")
+        # Preserve partial results even if a later lookup or Telegram edit fails.
+        item["ratings"] = {
+            pid: {"rating": rating.rating, "swing": rating.swing}
+            for pid, rating in ratings.items() if pid in item["players"]
+        }
+        if text != item["last_text"]:
+            if not telegram.edit_message(item["message_id"], text, chat_id=item["chat_id"]):
+                save_state(config.state_file, state)
+                success = False
+                continue
+            item["last_text"] = text
+            LOGGER.info("Updated notification for match %s.", match_id)
+        if complete or expired:
+            del pending[match_id]
+            LOGGER.info("Finished Rating updates for match %s (%s).",
+                        match_id, "complete" if complete else "expired")
+        save_state(config.state_file, state)
+    return success
+
+
 def run_once(
     config: Config,
     faceit: FaceitClient,
     telegram: TelegramClient,
     flaresolverr: RatingProvider | None = None,
 ) -> int:
+    # Hold the lock through browser cleanup as well as state updates.
+    lock_path = config.state_file.with_suffix(config.state_file.suffix + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_path.open("a")
+    except OSError as exc:
+        raise StateError(f"Cannot open state lock {lock_path}.") from exc
+    with lock_file as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            LOGGER.info("Another bot run is active; skipping this check.")
+            return 0
+        try:
+            return _run_once(config, faceit, telegram, flaresolverr)
+        finally:
+            if isinstance(flaresolverr, FlareSolverrClient):
+                try:
+                    flaresolverr.close()
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Could not clean up the private FlareSolverr session (%s).",
+                        type(exc).__name__,
+                    )
+
+
+def _run_once(
+    config: Config,
+    faceit: FaceitClient,
+    telegram: TelegramClient,
+    flaresolverr: RatingProvider | None = None,
+) -> int:
     state, is_new_state_file = load_state(config.state_file)
-    original_state = dict(state)
+    pending = state.get(PENDING_MESSAGES_KEY, {})
+    previous_pending_ids = list(pending)
     latest_by_player: dict[str, str | None] = {}
     had_error = False
 
@@ -1138,38 +1275,16 @@ def run_once(
             had_error = True
             continue
 
-        finished_at = finite_float(match_details.get("finished_at"))
-        if finished_at is not None and finished_at > 0:
-            match_age_seconds = max(0.0, time.time() - finished_at)
-            if match_age_seconds < MATCH_PROCESSING_DELAY_SECONDS:
-                remaining_minutes = (
-                    MATCH_PROCESSING_DELAY_SECONDS - match_age_seconds
-                ) / 60
-                LOGGER.info(
-                    "Match %s finished less than 15 minutes ago; processing "
-                    "is deferred for approximately %.1f more minute(s).",
-                    match_id,
-                    remaining_minutes,
-                )
-                continue
-
         stats_data = faceit.match_stats(match_id)
         if stats_data is None:
             had_error = True
             continue
 
-        faceit_ratings: dict[str, FaceitRating] = {}
-        if flaresolverr is not None:
-            try:
-                faceit_ratings = flaresolverr.match_ratings(
-                    match_id, config.game_id
-                )
-            except Exception as exc:
-                LOGGER.warning(
-                    "Optional FACEIT Rating lookup failed unexpectedly (%s); "
-                    "the notification will be sent without Rating and Swing.",
-                    type(exc).__name__,
-                )
+        faceit_ratings = ratings_for_match(flaresolverr, match_id, config.game_id)
+        match_players = tracked_match_players(stats_data, config.players)
+        waiting = flaresolverr is not None and any(
+            pid not in faceit_ratings for pid in match_players
+        )
 
         message = build_message(
             match_id,
@@ -1179,22 +1294,42 @@ def run_once(
             config.game_id,
             config.timezone,
             faceit_ratings,
+            "⏳ Rating и Swing рассчитываются" if waiting else None,
         )
         if message is None:
             had_error = True
             continue
 
-        if not telegram.send_message(message):
+        message_id = telegram.send_message(message)
+        if not message_id:
             had_error = True
             continue
 
+        if waiting:
+            pending[match_id] = {
+                "message_id": message_id, "chat_id": config.telegram_chat_id,
+                "sent_at": time.time(), "game_id": config.game_id,
+                "timezone": config.timezone_name, "details": match_details,
+                "stats": stats_data, "players": match_players, "last_text": message,
+                "ratings": {
+                    pid: {"rating": rating.rating, "swing": rating.swing}
+                    for pid, rating in faceit_ratings.items() if pid in match_players
+                },
+            }
+            state[PENDING_MESSAGES_KEY] = pending
         for player_id, latest_match_id in latest_by_player.items():
             if latest_match_id == match_id:
                 state[player_id] = match_id
+        # Persist each successful send together with its update job.
+        save_state(config.state_file, state)
         LOGGER.info("Sent a notification for match %s.", match_id)
 
-    if is_new_state_file or state != original_state:
+    if is_new_state_file or baseline_count:
         save_state(config.state_file, state)
+    if not update_pending_messages(
+        config, state, previous_pending_ids, telegram, flaresolverr
+    ):
+        had_error = True
 
     return 1 if had_error else 0
 
@@ -1281,14 +1416,6 @@ def main(argv: list[str] | None = None) -> int:
         LOGGER.error("State error: %s", exc)
         return 2
     finally:
-        if flaresolverr is not None:
-            try:
-                flaresolverr.close()
-            except Exception as exc:
-                LOGGER.warning(
-                    "Could not clean up the private FlareSolverr session (%s).",
-                    type(exc).__name__,
-                )
         session.close()
 
 

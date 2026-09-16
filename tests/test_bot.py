@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 from bot import (
     Config,
+    PENDING_MESSAGES_KEY,
+    StateError,
     ConfigurationError,
     FaceitRating,
     FlareSolverrClient,
@@ -72,10 +74,16 @@ class FakeTelegram:
     def __init__(self, result: bool = True) -> None:
         self.result = result
         self.messages: list[str] = []
+        self.edits: list[tuple[int, str, str]] = []
+        self.edit_ok = True
 
-    def send_message(self, text: str) -> bool:
+    def send_message(self, text: str) -> int | None:
         self.messages.append(text)
-        return self.result
+        return len(self.messages) if self.result else None
+
+    def edit_message(self, message_id: int, text: str, *, chat_id: str) -> bool:
+        self.edits.append((message_id, text, chat_id))
+        return self.edit_ok
 
 
 class FakeFlareSolverr:
@@ -448,7 +456,7 @@ class PollingTests(unittest.TestCase):
             state, _ = load_state(state_file)
             self.assertEqual(state[PLAYER_ID], "new-match")
 
-    def test_match_younger_than_fifteen_minutes_is_deferred(self) -> None:
+    def test_recent_match_is_sent_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             state_file = Path(temporary_directory) / "state.json"
             state_file.write_text(
@@ -468,10 +476,10 @@ class PollingTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
-            self.assertEqual(telegram.messages, [])
-            self.assertEqual(flaresolverr.requests, [])
+            self.assertEqual(len(telegram.messages), 1)
+            self.assertEqual(flaresolverr.requests, [("new-match", "cs2")])
             state, _ = load_state(state_file)
-            self.assertEqual(state[PLAYER_ID], "old-match")
+            self.assertEqual(state[PLAYER_ID], "new-match")
 
     def test_fifteen_minute_old_match_is_processed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -543,7 +551,7 @@ class PollingTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(len(telegram.messages), 1)
-            self.assertNotIn("Rating:", telegram.messages[0])
+            self.assertNotIn("• Rating:", telegram.messages[0])
             self.assertNotIn("Swing:", telegram.messages[0])
 
     def test_unexpected_optional_rating_error_does_not_block_message(self) -> None:
@@ -582,9 +590,182 @@ class PollingTests(unittest.TestCase):
             self.assertEqual(state[PLAYER_ID], "old-match")
 
 
+class PendingMessageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "state.json"
+        self.path.write_text(json.dumps({PLAYER_ID: "old-match"}), encoding="utf-8")
+        self.config = make_config(self.path)
+        self.telegram = FakeTelegram()
+        self.provider = FakeFlareSolverr({})
+        self.faceit = FakeFaceit("new-match")
+
+    def run_at(self, timestamp: float) -> int:
+        with patch("bot.time.time", return_value=timestamp):
+            return run_once(self.config, self.faceit, self.telegram, self.provider)
+
+    def test_updates_original_message_after_restart_without_resending(self) -> None:
+        self.assertEqual(self.run_at(10000), 0)
+        self.assertIn("⏳ Rating и Swing рассчитываются", self.telegram.messages[0])
+        state, _ = load_state(self.path)
+        self.assertEqual(state[PLAYER_ID], "new-match")
+        self.assertEqual(state[PENDING_MESSAGES_KEY]["new-match"]["message_id"], 1)
+        self.provider = FakeFlareSolverr({PLAYER_ID: FaceitRating(1.5, 0.0)})
+        self.assertEqual(self.run_at(10900), 0)
+        self.assertEqual(len(self.telegram.messages), 1)
+        self.assertEqual(self.telegram.edits[0][0], 1)
+        self.assertIn("Swing: <code>+0.00%", self.telegram.edits[0][1])
+        self.assertNotIn("рассчитываются", self.telegram.edits[0][1])
+        state, _ = load_state(self.path)
+        self.assertEqual(state[PENDING_MESSAGES_KEY], {})
+        self.run_at(11800)
+        self.assertEqual(len(self.telegram.edits), 1)
+
+    def test_new_match_does_not_replace_pending_old_match(self) -> None:
+        self.run_at(10000)
+        self.faceit = FakeFaceit("next-match")
+        self.run_at(10900)
+        state, _ = load_state(self.path)
+        self.assertEqual(set(state[PENDING_MESSAGES_KEY]), {"new-match", "next-match"})
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, 0.03)}
+        self.run_at(11800)
+        self.assertEqual(len(self.telegram.messages), 2)
+        self.assertEqual({edit[0] for edit in self.telegram.edits}, {1, 2})
+        self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_unchanged_pending_message_is_not_edited(self) -> None:
+        self.run_at(10000)
+        self.run_at(10900)
+        self.assertEqual(self.telegram.edits, [])
+        self.assertEqual(len(self.telegram.messages), 1)
+
+    def test_complete_initial_ratings_do_not_create_update_job(self) -> None:
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, 0.0)}
+        self.run_at(10000)
+        self.assertNotIn("рассчитываются", self.telegram.messages[0])
+        self.assertNotIn(PENDING_MESSAGES_KEY, load_state(self.path)[0])
+        self.run_at(10900)
+        self.assertEqual(len(self.provider.requests), 1)
+
+    def test_failed_send_does_not_create_update_job(self) -> None:
+        self.telegram.result = False
+        self.assertEqual(self.run_at(10000), 1)
+        state, _ = load_state(self.path)
+        self.assertEqual(state[PLAYER_ID], "old-match")
+        self.assertNotIn(PENDING_MESSAGES_KEY, state)
+
+    def test_disabled_flaresolverr_does_not_add_waiting_marker(self) -> None:
+        self.provider = None
+        self.run_at(10000)
+        self.assertNotIn("рассчитываются", self.telegram.messages[0])
+        self.assertNotIn(PENDING_MESSAGES_KEY, load_state(self.path)[0])
+
+    def test_expiry_stops_rating_requests_but_retries_failed_final_edit(self) -> None:
+        self.run_at(10000)
+        self.provider.requests.clear()
+        self.telegram.edit_ok = False
+        self.assertEqual(self.run_at(17200), 1)
+        self.assertEqual(self.provider.requests, [])
+        self.assertIn("недоступны", self.telegram.edits[-1][1])
+        self.assertIn("new-match", load_state(self.path)[0][PENDING_MESSAGES_KEY])
+        self.telegram.edit_ok = True
+        self.assertEqual(self.run_at(18100), 0)
+        self.assertEqual(self.provider.requests, [])
+        self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_failed_edit_preserves_ratings_for_next_run(self) -> None:
+        self.run_at(10000)
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, 0.03)}
+        self.telegram.edit_ok = False
+        self.assertEqual(self.run_at(10900), 1)
+        self.provider.ratings = {}
+        self.telegram.edit_ok = True
+        self.assertEqual(self.run_at(11800), 0)
+        self.assertIn("Rating: <code>1.50", self.telegram.edits[-1][1])
+        self.assertEqual(len(self.telegram.messages), 1)
+        self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_partial_ratings_accumulate_and_resort_players(self) -> None:
+        from dataclasses import replace
+        self.config = replace(self.config, players={
+            PLAYER_ID: "First", SECOND_PLAYER_ID: "Second",
+        })
+        self.path.write_text(json.dumps({
+            PLAYER_ID: "old-match", SECOND_PLAYER_ID: "old-match",
+        }), encoding="utf-8")
+        stats = self.faceit.match_stats("new-match")
+        stats["rounds"][0]["teams"][0]["players"].append({
+            "player_id": SECOND_PLAYER_ID, "player_stats": {"K/D Ratio": "0.5"},
+        })
+        with patch.object(self.faceit, "match_stats", return_value=stats):
+            self.run_at(10000)
+        self.provider.ratings = {SECOND_PLAYER_ID: FaceitRating(3.0, 0.0)}
+        self.run_at(10900)
+        text = self.telegram.edits[-1][1]
+        self.assertLess(text.index("👤 <b>Second"), text.index("👤 <b>First"))
+        self.assertEqual(text.count("рассчитываются"), 1)
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.1, -0.01)}
+        self.run_at(11800)
+        text = self.telegram.edits[-1][1]
+        self.assertEqual(text.count("• Rating:"), 2)
+        self.assertNotIn("рассчитываются", text)
+        self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_queue_keeps_original_chat_after_config_changes(self) -> None:
+        from dataclasses import replace
+        original_chat = self.config.telegram_chat_id
+        self.run_at(10000)
+        self.config = replace(self.config, telegram_chat_id="another-chat")
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, 0.0)}
+        self.run_at(10900)
+        self.assertEqual(self.telegram.edits[-1][2], original_chat)
+
+    def test_corrupt_queue_is_rejected_before_network_calls(self) -> None:
+        self.path.write_text(json.dumps({PENDING_MESSAGES_KEY: {"bad": {}}}))
+        with self.assertRaises(StateError):
+            self.run_at(10000)
+        self.assertEqual(self.telegram.messages, [])
+        self.assertEqual(self.provider.requests, [])
+
+    def test_overlapping_run_is_skipped(self) -> None:
+        import fcntl
+        with self.path.with_suffix(".json.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.run_at(10000), 0)
+        self.assertEqual(self.telegram.messages, [])
+        self.assertEqual(self.provider.requests, [])
+
+
 class TelegramClientTests(unittest.TestCase):
-    def test_sends_only_telegram_request_through_configured_proxy(self) -> None:
+    def test_send_returns_message_id(self) -> None:
+        session = FakeHTTPSession([FakeResponse(200, {
+            "ok": True, "result": {"message_id": 123},
+        })])
+        client = TelegramClient(session, "test-token", "123", 15)
+        self.assertEqual(client.send_message("test"), 123)
+
+    def test_edit_uses_saved_destination_and_proxy(self) -> None:
         session = FakeHTTPSession([FakeResponse(200, {"ok": True})])
+        client = TelegramClient(session, "test-token", "new-chat", 15,
+                                "socks5h://127.0.0.1:1080")
+        self.assertTrue(client.edit_message(99, "updated", chat_id="old-chat"))
+        request = session.requests[0]
+        self.assertTrue(request["url"].endswith("/editMessageText"))
+        self.assertEqual(request["json"]["chat_id"], "old-chat")
+        self.assertEqual(request["json"]["message_id"], 99)
+        self.assertEqual(request["json"]["parse_mode"], "HTML")
+        self.assertEqual(request["proxies"], {"https": "socks5h://127.0.0.1:1080"})
+
+    def test_already_applied_edit_is_success(self) -> None:
+        session = FakeHTTPSession([FakeResponse(400, {
+            "ok": False, "description": "Bad Request: message is not modified",
+        })])
+        client = TelegramClient(session, "test-token", "123", 15)
+        self.assertTrue(client.edit_message(99, "same", chat_id="123"))
+
+    def test_sends_only_telegram_request_through_configured_proxy(self) -> None:
+        session = FakeHTTPSession([FakeResponse(200, {"ok": True, "result": {"message_id": 42}})])
         proxy_url = "socks5h://127.0.0.1:1080"
         client = TelegramClient(
             session,
@@ -601,7 +782,7 @@ class TelegramClientTests(unittest.TestCase):
         )
 
     def test_direct_telegram_request_has_no_proxy_option(self) -> None:
-        session = FakeHTTPSession([FakeResponse(200, {"ok": True})])
+        session = FakeHTTPSession([FakeResponse(200, {"ok": True, "result": {"message_id": 42}})])
         client = TelegramClient(session, "test-token", "123", 15)
 
         self.assertTrue(client.send_message("test"))
@@ -726,107 +907,23 @@ class FlareSolverrClientTests(unittest.TestCase):
         self.assertEqual(second_request["session"], "test-session")
         self.assertEqual(first_request["url"], second_request["url"])
 
-    def test_waits_in_the_same_session_until_rating_is_ready(self) -> None:
-        empty_scoreboard = {"payload": {"cs2": {"teams": []}}}
-        ready_scoreboard = {
-            "payload": {
-                "cs2": {
-                    "teams": [
-                        {
-                            "players": [
-                                {
-                                    "player_id": PLAYER_ID,
-                                    "stats": {
-                                        "faceit_rating": 1.5522096,
-                                        "faceit_rating_swing": 0.07237932,
-                                    },
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        }
-        session = FakeHTTPSession(
-            [
-                FakeResponse(200, {"status": "ok", "session": "test-session"}),
-                FakeResponse(
-                    200,
-                    {
-                        "status": "ok",
-                        "solution": {
-                            "status": 200,
-                            "response": json.dumps(empty_scoreboard),
-                        },
-                    },
-                ),
-                FakeResponse(
-                    200,
-                    {
-                        "status": "ok",
-                        "solution": {
-                            "status": 200,
-                            "response": json.dumps(ready_scoreboard),
-                        },
-                    },
-                ),
-                FakeResponse(200, {"status": "ok", "message": "removed"}),
-            ]
-        )
+    def test_empty_scoreboard_returns_without_waiting(self) -> None:
+        session = FakeHTTPSession([
+            FakeResponse(200, {"status": "ok", "session": "test-session"}),
+            FakeResponse(200, {"status": "ok", "solution": {
+                "status": 200, "response": '{"payload":{"cs2":{"teams":[]}}}'
+            }}),
+            FakeResponse(200, {"status": "ok"}),
+        ])
         client = FlareSolverrClient(session, "http://127.0.0.1:8191/v1", 120000)
-
         with patch("bot.time.sleep") as sleep:
-            ratings = client.match_ratings("1-test-match", "cs2")
+            self.assertEqual(client.match_ratings("new-match", "cs2"), {})
         client.close()
-
+        sleep.assert_not_called()
         self.assertEqual(
-            ratings[PLAYER_ID], FaceitRating(rating=1.5522096, swing=0.07237932)
+            [r["json"]["cmd"] for r in session.requests],
+            ["sessions.create", "request.get", "sessions.destroy"],
         )
-        sleep.assert_called_once_with(60.0)
-        scoreboard_requests = [
-            request["json"]
-            for request in session.requests
-            if request["json"]["cmd"] == "request.get"
-        ]
-        self.assertEqual(len(scoreboard_requests), 2)
-        self.assertEqual(scoreboard_requests[0]["session"], "test-session")
-        self.assertEqual(scoreboard_requests[1]["session"], "test-session")
-        self.assertEqual(
-            scoreboard_requests[0]["url"], scoreboard_requests[1]["url"]
-        )
-
-    def test_stops_waiting_after_ten_empty_scoreboards(self) -> None:
-        empty_scoreboard = {"payload": {"cs2": {"teams": []}}}
-        responses = [
-            FakeResponse(200, {"status": "ok", "session": "test-session"})
-        ]
-        responses.extend(
-            FakeResponse(
-                200,
-                {
-                    "status": "ok",
-                    "solution": {
-                        "status": 200,
-                        "response": json.dumps(empty_scoreboard),
-                    },
-                },
-            )
-            for _ in range(10)
-        )
-        responses.append(FakeResponse(200, {"status": "ok", "message": "removed"}))
-        session = FakeHTTPSession(responses)
-        client = FlareSolverrClient(session, "http://127.0.0.1:8191/v1", 120000)
-
-        with patch("bot.time.sleep") as sleep:
-            self.assertEqual(client.match_ratings("1-test-match", "cs2"), {})
-        client.close()
-
-        self.assertEqual(sleep.call_count, 9)
-        self.assertTrue(
-            all(call.args == (60.0,) for call in sleep.call_args_list)
-        )
-        commands = [request["json"]["cmd"] for request in session.requests]
-        self.assertEqual(commands.count("request.get"), 10)
 
     def test_http_500_returns_no_ratings_and_cleans_up(self) -> None:
         session = FakeHTTPSession(
