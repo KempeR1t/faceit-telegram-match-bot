@@ -237,6 +237,39 @@ class ConfigurationTests(unittest.TestCase):
     def test_format_duration(self) -> None:
         self.assertEqual(format_duration(125), "2м 5с")
 
+    def test_table_escapes_external_values_and_contains_all_columns(self) -> None:
+        faceit = FakeFaceit("test-match")
+        stats = faceit.match_stats("test-match")
+        stats["rounds"][0]["round_stats"]["Map"] = "<b>map</b>"
+        stats["rounds"][0]["teams"][0]["players"][0]["player_stats"]["ADR"] = "<bad>"
+        message = build_message(
+            "test-match", faceit.match_details("test-match"), stats,
+            {PLAYER_ID: "<b>Player & One</b>"}, "cs2", ZoneInfo("UTC"),
+            {PLAYER_ID: FaceitRating(1.92, 0.093)},
+        )
+        self.assertIn("<table bordered striped compact>", message)
+        self.assertIn(
+            "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>"
+            "<th>K/D ratio</th><th>ADR</th><th>MVP</th>", message,
+        )
+        self.assertIn("<td>&lt;b&gt;Player &amp; One&lt;/b&gt;</td>", message)
+        self.assertIn("<td>🟠 1.92</td><td>💚 +9.30%</td><td>20/10</td>", message)
+        self.assertIn("<td>&lt;bad&gt;</td>", message)
+        self.assertNotIn("<b>map</b>", message)
+        self.assertEqual(message.count("<tr>"), 2)
+
+    def test_table_missing_ratings_use_merged_status_or_dashes(self) -> None:
+        faceit = FakeFaceit("test-match")
+        args = (
+            "test-match", faceit.match_details("test-match"),
+            faceit.match_stats("test-match"), {PLAYER_ID: "Player"},
+            "cs2", ZoneInfo("UTC"),
+        )
+        waiting = build_message(*args, rating_status="⏳ Rating и Swing рассчитываются")
+        self.assertIn('<td colspan="2">⏳ Rating и Swing рассчитываются</td>', waiting)
+        self.assertIn("<td>20/10</td>", waiting)
+        self.assertIn("<td>—</td><td>—</td>", build_message(*args))
+
     def test_extract_faceit_ratings(self) -> None:
         payload = {
             "payload": {
@@ -272,8 +305,7 @@ class ConfigurationTests(unittest.TestCase):
 
         self.assertEqual(
             line,
-            "• ⚪ Rating: <code>1.07</code> | "
-            "🔻 Swing: <code>-0.71%</code>\n",
+            "<td>⚪ 1.07</td><td>🔻 -0.71%</td>",
         )
 
     def test_match_result_uses_first_configured_player_and_is_shown_once(self) -> None:
@@ -320,8 +352,8 @@ class ConfigurationTests(unittest.TestCase):
         result_line = "🏁 Результат: 🔴 <b>ПОРАЖЕНИЕ</b> 😡"
         self.assertEqual(message.count("🏁 Результат:"), 1)
         self.assertIn(result_line, message)
-        self.assertLess(message.index("(длительность:"), message.index(result_line))
-        self.assertLess(message.index(result_line), message.index("👤"))
+        self.assertLess(message.index("⏱"), message.index(result_line))
+        self.assertLess(message.index(result_line), message.index("<table"))
         self.assertNotIn("ВЫИГРАЛ", message)
         self.assertNotIn("ПРОИГРАЛ", message)
         self.assertIn(
@@ -347,10 +379,9 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(
                     format_faceit_rating(FaceitRating(value, 0.0)),
-                    f"• {marker} Rating: <code>{displayed}</code> | "
-                    "Swing: <code>+0.00%</code>\n",
+                    f"<td>{marker} {displayed}</td><td>+0.00%</td>",
                 )
-        self.assertEqual(format_faceit_rating(None), "")
+        self.assertEqual(format_faceit_rating(None), "<td>—</td><td>—</td>")
 
     def test_players_are_sorted_by_rating_with_kd_fallback(self) -> None:
         match_details = {
@@ -407,12 +438,12 @@ class ConfigurationTests(unittest.TestCase):
         assert message_by_rating is not None
         assert message_by_kd is not None
         self.assertLess(
-            message_by_rating.index("👤 <b>HighRating</b>"),
-            message_by_rating.index("👤 <b>HighKD</b>"),
+            message_by_rating.index("<td>HighRating</td>"),
+            message_by_rating.index("<td>HighKD</td>"),
         )
         self.assertLess(
-            message_by_kd.index("👤 <b>HighKD</b>"),
-            message_by_kd.index("👤 <b>HighRating</b>"),
+            message_by_kd.index("<td>HighKD</td>"),
+            message_by_kd.index("<td>HighRating</td>"),
         )
 
 
@@ -550,11 +581,10 @@ class PollingTests(unittest.TestCase):
             self.assertEqual(result, 0)
             message = telegram.messages[0]
             rating_line = (
-                "• 🟢 Rating: <code>1.55</code> | "
-                "💚 Swing: <code>+7.24%</code>"
+                "<td>🟢 1.55</td><td>💚 +7.24%</td>"
             )
             self.assertIn(rating_line, message)
-            self.assertLess(message.index(rating_line), message.index("• Kills:"))
+            self.assertLess(message.index(rating_line), message.index("<td>20/10</td>"))
             self.assertEqual(flaresolverr.requests, [("new-match", "cs2")])
 
     def test_missing_optional_rating_does_not_block_message(self) -> None:
@@ -638,7 +668,7 @@ class PendingMessageTests(unittest.TestCase):
         self.assertEqual(self.run_at(10900), 0)
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertEqual(self.telegram.edits[0][0], 1)
-        self.assertIn("Swing: <code>+0.00%", self.telegram.edits[0][1])
+        self.assertIn("<td>+0.00%</td>", self.telegram.edits[0][1])
         self.assertNotIn("рассчитываются", self.telegram.edits[0][1])
         state, _ = load_state(self.path)
         self.assertEqual(state[PENDING_MESSAGES_KEY], {})
@@ -656,6 +686,19 @@ class PendingMessageTests(unittest.TestCase):
         self.assertEqual(len(self.telegram.messages), 2)
         self.assertEqual({edit[0] for edit in self.telegram.edits}, {1, 2})
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_legacy_text_pending_message_becomes_table_without_resending(self) -> None:
+        self.run_at(10000)
+        state, _ = load_state(self.path)
+        state[PENDING_MESSAGES_KEY]["new-match"]["last_text"] = (
+            "🎮 <b>Матч на FACEIT завершён!</b>\n• ⏳ Rating и Swing рассчитываются"
+        )
+        self.path.write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_at(10900), 0)
+        self.assertEqual(len(self.telegram.messages), 1)
+        self.assertEqual(self.telegram.edits[0][0], 1)
+        self.assertIn("<table bordered striped compact>", self.telegram.edits[0][1])
+        self.assertIn("new-match", load_state(self.path)[0][PENDING_MESSAGES_KEY])
 
     def test_unchanged_pending_message_is_not_edited(self) -> None:
         self.run_at(10000)
@@ -705,8 +748,7 @@ class PendingMessageTests(unittest.TestCase):
         self.provider.ratings = {}
         self.telegram.edit_ok = True
         self.assertEqual(self.run_at(11800), 0)
-        self.assertIn("Rating: <code>1.50", self.telegram.edits[-1][1])
-        self.assertIn("🟢 Rating: <code>1.50", self.telegram.edits[-1][1])
+        self.assertIn("<td>🟢 1.50</td><td>💚 +3.00%</td>", self.telegram.edits[-1][1])
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 
@@ -727,12 +769,13 @@ class PendingMessageTests(unittest.TestCase):
         self.provider.ratings = {SECOND_PLAYER_ID: FaceitRating(3.0, 0.0)}
         self.run_at(10900)
         text = self.telegram.edits[-1][1]
-        self.assertLess(text.index("👤 <b>Second"), text.index("👤 <b>First"))
+        self.assertLess(text.index("<td>Second</td>"), text.index("<td>First</td>"))
         self.assertEqual(text.count("рассчитываются"), 1)
         self.provider.ratings = {PLAYER_ID: FaceitRating(1.1, -0.01)}
         self.run_at(11800)
         text = self.telegram.edits[-1][1]
-        self.assertEqual(text.count("Rating: <code>"), 2)
+        self.assertIn("<td>🟠 3.00</td>", text)
+        self.assertIn("<td>⚪ 1.10</td>", text)
         self.assertNotIn("рассчитываются", text)
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 
@@ -768,6 +811,10 @@ class TelegramClientTests(unittest.TestCase):
         })])
         client = TelegramClient(session, "test-token", "123", 15)
         self.assertEqual(client.send_message("test"), 123)
+        self.assertTrue(session.requests[0]["url"].endswith("/sendRichMessage"))
+        self.assertEqual(session.requests[0]["json"]["rich_message"], {"html": "test"})
+        self.assertNotIn("text", session.requests[0]["json"])
+        self.assertNotIn("parse_mode", session.requests[0]["json"])
 
     def test_edit_uses_saved_destination_and_proxy(self) -> None:
         session = FakeHTTPSession([FakeResponse(200, {"ok": True})])
@@ -778,7 +825,9 @@ class TelegramClientTests(unittest.TestCase):
         self.assertTrue(request["url"].endswith("/editMessageText"))
         self.assertEqual(request["json"]["chat_id"], "old-chat")
         self.assertEqual(request["json"]["message_id"], 99)
-        self.assertEqual(request["json"]["parse_mode"], "HTML")
+        self.assertEqual(request["json"]["rich_message"], {"html": "updated"})
+        self.assertNotIn("text", request["json"])
+        self.assertNotIn("parse_mode", request["json"])
         self.assertEqual(request["proxies"], {"https": "socks5h://127.0.0.1:1080"})
 
     def test_already_applied_edit_is_success(self) -> None:

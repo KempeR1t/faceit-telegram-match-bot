@@ -31,7 +31,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -784,7 +784,7 @@ class TelegramClient:
         self._proxy_url = proxy_url
 
     def send_message(self, text: str) -> int | None:
-        result = self._message_request("sendMessage", text)
+        result = self._message_request("sendRichMessage", text)
         message = result.get("result") if result else None
         message_id = message.get("message_id") if isinstance(message, dict) else None
         if type(message_id) is int and message_id > 0:
@@ -807,9 +807,7 @@ class TelegramClient:
         url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/{method}"
         payload = {
             "chat_id": chat_id if chat_id is not None else self._chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "link_preview_options": {"is_disabled": True},
+            "rich_message": {"html": text},
         }
         if message_id is not None:
             payload["message_id"] = message_id
@@ -962,7 +960,7 @@ def escaped(value: Any) -> str:
 
 def format_faceit_rating(rating: FaceitRating | None) -> str:
     if rating is None:
-        return ""
+        return "<td>—</td><td>—</td>"
     # Classify the displayed value so rounding cannot contradict the marker.
     rating_text = f"{rating.rating:.2f}"
     displayed_rating = float(rating_text)
@@ -984,8 +982,8 @@ def format_faceit_rating(rating: FaceitRating | None) -> str:
     else:
         swing_marker = ""
     return (
-        f"• {rating_marker} Rating: <code>{rating_text}</code> | "
-        f"{swing_marker}Swing: <code>{swing_percent:+.2f}%</code>\n"
+        f"<td>{rating_marker} {rating_text}</td>"
+        f"<td>{swing_marker}{swing_percent:+.2f}%</td>"
     )
 
 
@@ -1063,7 +1061,7 @@ def build_message(
             player_rating = (faceit_ratings or {}).get(player_id)
             rating_line = format_faceit_rating(player_rating)
             if player_rating is None and rating_status:
-                rating_line = f"• {escaped(rating_status)}\n"
+                rating_line = f'<td colspan="2">{escaped(rating_status)}</td>'
             kd_value = finite_float(player_stats.get("K/D Ratio"))
             sort_value = (
                 player_rating.rating
@@ -1075,14 +1073,13 @@ def build_message(
                 (
                     sort_value,
                     player_order[player_id],
-                    "\n"
-                    f"👤 <b>{nickname}</b>\n"
+                    f"<tr><td>{nickname}</td>"
                     f"{rating_line}"
-                    f"• Kills: <code>{escaped(player_stats.get('Kills', '0'))}</code> | "
-                    f"Deaths: <code>{escaped(player_stats.get('Deaths', '0'))}</code> | "
-                    f"K/D: <code>{escaped(player_stats.get('K/D Ratio', '0.0'))}</code>\n"
-                    f"• ADR: <code>{escaped(player_stats.get('ADR', '0'))}</code> | "
-                    f"MVP: <code>{escaped(player_stats.get('MVPs', '0'))}</code>\n",
+                    f"<td>{escaped(player_stats.get('Kills', '0'))}/"
+                    f"{escaped(player_stats.get('Deaths', '0'))}</td>"
+                    f"<td>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
+                    f"<td>{escaped(player_stats.get('ADR', '0'))}</td>"
+                    f"<td>{escaped(player_stats.get('MVPs', '0'))}</td></tr>",
                 )
             )
 
@@ -1112,14 +1109,14 @@ def build_message(
         f"{quote(match_id, safe='-')}/scoreboard"
     )
     return (
-        "🎮 <b>Матч на FACEIT завершён!</b>\n"
-        f"🗺 Карта: <b>{escaped(map_name)}</b>\n"
-        f"📊 Счёт: <code>{escaped(match_score)}</code>\n"
-        f"⏱ Время матча: <code>{escaped(start_text)}–{escaped(end_text)}</code> "
-        f"(длительность: <code>{escaped(duration_text)}</code>)\n"
-        f"🏁 Результат: {match_result}\n"
-        f"{''.join(block for _, _, block in player_blocks)}\n"
-        f"🔗 <a href=\"{escaped(room_url)}\">Открыть комнату матча</a>"
+        f"<h2>🎮 FACEIT · {escaped(map_name)} · {escaped(match_score)}</h2>"
+        f"<p>⏱ {escaped(start_text)}–{escaped(end_text)} · {escaped(duration_text)}<br>"
+        f"🏁 Результат: {match_result}</p>"
+        "<table bordered striped compact><tr>"
+        "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>"
+        "<th>K/D ratio</th><th>ADR</th><th>MVP</th></tr>"
+        f"{''.join(block for _, _, block in player_blocks)}</table>"
+        f"<p>🔗 <a href=\"{escaped(room_url)}\">Открыть scoreboard</a></p>"
     )
 
 
