@@ -1114,7 +1114,7 @@ def build_message(
         f"🏁 Результат: {match_result}</p>"
         "<table bordered striped compact><tr>"
         "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>"
-        "<th>K/D ratio</th><th>ADR</th><th>MVP</th></tr>"
+        "<th>K/D r</th><th>ADR</th><th>MVP</th></tr>"
         f"{''.join(block for _, _, block in player_blocks)}</table>"
         f"<p>🔗 <a href=\"{escaped(room_url)}\">Открыть scoreboard</a></p>"
     )

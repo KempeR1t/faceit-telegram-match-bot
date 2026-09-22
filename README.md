@@ -135,14 +135,14 @@ Rating/Swing для этого сообщения. У игроков с недо
 
 🏁 Результат: 🟢 **ПОБЕДА** 🎉
 
-| Игрок | Rating | Swing | K/D | K/D ratio | ADR | MVP |
+| Игрок | Rating | Swing | K/D | K/D r | ADR | MVP |
 |---|---|---|---|---|---|---|
 | Nickname1 | 🟢 1.55 | 💚 +7.24% | 20/10 | 2.00 | 95.0 | 3 |
 | Nickname2 | ⚪ 1.07 | 🔻 -0.71% | 11/7 | 1.57 | 70.5 | 2 |
 
 🔗 Открыть scoreboard
 
-`K/D` содержит количество убийств и смертей, `K/D ratio` — их отношение.
+`K/D` содержит количество убийств и смертей, `K/D r` — их отношение (ratio).
 Таблица имеет границы, чередование фона строк и компактные отступы.
 Используется [Telegram Rich Messages](https://core.telegram.org/bots/api#sendrichmessage)
 с Rich HTML, а не обычный `parse_mode=HTML` или `MarkdownV2`.

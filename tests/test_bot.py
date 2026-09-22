@@ -250,7 +250,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("<table bordered striped compact>", message)
         self.assertIn(
             "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>"
-            "<th>K/D ratio</th><th>ADR</th><th>MVP</th>", message,
+            "<th>K/D r</th><th>ADR</th><th>MVP</th>", message,
         )
         self.assertIn("<td>&lt;b&gt;Player &amp; One&lt;/b&gt;</td>", message)
         self.assertIn("<td>🟠 1.92</td><td>💚 +9.30%</td><td>20/10</td>", message)
