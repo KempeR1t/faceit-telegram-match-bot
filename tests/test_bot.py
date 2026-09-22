@@ -272,7 +272,7 @@ class ConfigurationTests(unittest.TestCase):
 
         self.assertEqual(
             line,
-            "• Rating: <code>1.07</code> | "
+            "• ⚪ Rating: <code>1.07</code> | "
             "🔻 Swing: <code>-0.71%</code>\n",
         )
 
@@ -328,6 +328,29 @@ class ConfigurationTests(unittest.TestCase):
             'href="https://www.faceit.com/ru/cs2/room/1-test-match/scoreboard"',
             message,
         )
+
+    def test_rating_markers_follow_displayed_value_at_boundaries(self) -> None:
+        cases = [
+            (0.0, "🔴", "0.00"),
+            (0.99, "🔴", "0.99"),
+            (1.0, "⚪", "1.00"),
+            (1.29, "⚪", "1.29"),
+            (1.30, "🟢", "1.30"),
+            (1.79, "🟢", "1.79"),
+            (1.80, "🟠", "1.80"),
+            (2.1, "🟠", "2.10"),
+            (0.999, "⚪", "1.00"),
+            (1.299, "🟢", "1.30"),
+            (1.799, "🟠", "1.80"),
+        ]
+        for value, marker, displayed in cases:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    format_faceit_rating(FaceitRating(value, 0.0)),
+                    f"• {marker} Rating: <code>{displayed}</code> | "
+                    "Swing: <code>+0.00%</code>\n",
+                )
+        self.assertEqual(format_faceit_rating(None), "")
 
     def test_players_are_sorted_by_rating_with_kd_fallback(self) -> None:
         match_details = {
@@ -527,7 +550,7 @@ class PollingTests(unittest.TestCase):
             self.assertEqual(result, 0)
             message = telegram.messages[0]
             rating_line = (
-                "• Rating: <code>1.55</code> | "
+                "• 🟢 Rating: <code>1.55</code> | "
                 "💚 Swing: <code>+7.24%</code>"
             )
             self.assertIn(rating_line, message)
@@ -551,7 +574,7 @@ class PollingTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(len(telegram.messages), 1)
-            self.assertNotIn("• Rating:", telegram.messages[0])
+            self.assertNotIn("Rating: <code>", telegram.messages[0])
             self.assertNotIn("Swing:", telegram.messages[0])
 
     def test_unexpected_optional_rating_error_does_not_block_message(self) -> None:
@@ -683,6 +706,7 @@ class PendingMessageTests(unittest.TestCase):
         self.telegram.edit_ok = True
         self.assertEqual(self.run_at(11800), 0)
         self.assertIn("Rating: <code>1.50", self.telegram.edits[-1][1])
+        self.assertIn("🟢 Rating: <code>1.50", self.telegram.edits[-1][1])
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 
@@ -708,7 +732,7 @@ class PendingMessageTests(unittest.TestCase):
         self.provider.ratings = {PLAYER_ID: FaceitRating(1.1, -0.01)}
         self.run_at(11800)
         text = self.telegram.edits[-1][1]
-        self.assertEqual(text.count("• Rating:"), 2)
+        self.assertEqual(text.count("Rating: <code>"), 2)
         self.assertNotIn("рассчитываются", text)
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 

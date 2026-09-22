@@ -31,7 +31,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -963,6 +963,17 @@ def escaped(value: Any) -> str:
 def format_faceit_rating(rating: FaceitRating | None) -> str:
     if rating is None:
         return ""
+    # Classify the displayed value so rounding cannot contradict the marker.
+    rating_text = f"{rating.rating:.2f}"
+    displayed_rating = float(rating_text)
+    if displayed_rating >= 1.80:
+        rating_marker = "🟠"
+    elif displayed_rating >= 1.30:
+        rating_marker = "🟢"
+    elif displayed_rating >= 1.00:
+        rating_marker = "⚪"
+    else:
+        rating_marker = "🔴"
     swing_percent = rating.swing * 100
     if round(swing_percent, 2) == 0:
         swing_percent = 0.0
@@ -973,7 +984,7 @@ def format_faceit_rating(rating: FaceitRating | None) -> str:
     else:
         swing_marker = ""
     return (
-        f"• Rating: <code>{rating.rating:.2f}</code> | "
+        f"• {rating_marker} Rating: <code>{rating_text}</code> | "
         f"{swing_marker}Swing: <code>{swing_percent:+.2f}%</code>\n"
     )
 
