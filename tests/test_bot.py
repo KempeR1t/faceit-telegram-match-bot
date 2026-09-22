@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from bot import (
     Config,
     PENDING_MESSAGES_KEY,
+    NEXT_LAYOUT_KEY,
     StateError,
     ConfigurationError,
     FaceitRating,
@@ -273,6 +274,24 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn('<td colspan="2">⏳ Rating и Swing рассчитываются</td>', waiting)
         self.assertIn("<td><b>K/D</b><br>20/10</td>", waiting)
         self.assertIn("<td><b>Rating</b><br>—</td><td><b>Swing</b><br>—</td>", build_message(*args))
+
+    def test_wide_table_has_one_row_per_player_and_escapes_values(self) -> None:
+        faceit = FakeFaceit("test-match")
+        stats = faceit.match_stats("test-match")
+        stats["rounds"][0]["teams"][0]["players"][0]["player_stats"]["ADR"] = "<bad>"
+        args = ("test-match", faceit.match_details("test-match"), stats,
+                {PLAYER_ID: "Player<One>"}, "cs2", ZoneInfo("UTC"))
+        text = build_message(*args, {PLAYER_ID: FaceitRating(1.55, -.01)}, layout="wide")
+        self.assertEqual(text.count("<tr>"), 2)
+        self.assertNotIn("rowspan", text)
+        self.assertNotIn("<details>", text)
+        self.assertIn("<th>Rating</th><th>Swing</th><th>K/D</th><th>K/D Ratio</th>", text)
+        self.assertIn("<td>Player&lt;One&gt;</td><td>🟢 1.55</td><td>🔻 -1.00%</td><td>20/10</td>", text)
+        self.assertIn("<td>&lt;bad&gt;</td>", text)
+        self.assertIn("<td>—</td><td>—</td>", build_message(*args, layout="wide"))
+        waiting = build_message(*args, rating_status="⏳ Rating и Swing рассчитываются", layout="wide")
+        self.assertIn('<td colspan="2">⏳ Rating и Swing рассчитываются</td>', waiting)
+        self.assertIn("<td>20/10</td>", waiting)
 
     def test_extract_faceit_ratings(self) -> None:
         payload = {
@@ -670,6 +689,89 @@ class PendingMessageTests(unittest.TestCase):
     def run_at(self, timestamp: float) -> int:
         with patch("bot.time.time", return_value=timestamp):
             return run_once(self.config, self.faceit, self.telegram, self.provider)
+
+    def test_new_matches_alternate_across_runs_without_pending_jobs(self) -> None:
+        self.provider = FakeFlareSolverr({PLAYER_ID: FaceitRating(1.5, .03)})
+        for index, expected_next in enumerate(("wide", "two_rows", "wide")):
+            self.faceit = FakeFaceit(f"match-{index}")
+            self.assertEqual(self.run_at(10000 + index * 900), 0)
+            text = self.telegram.messages[-1]
+            self.assertEqual('rowspan="2"' in text, index != 1)
+            self.assertEqual('<th>K/D Ratio</th>' in text, index == 1)
+            self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], expected_next)
+
+    def test_baseline_does_not_advance_layout(self) -> None:
+        self.path.unlink()
+        self.run_at(10000)
+        self.assertEqual(self.telegram.messages, [])
+        self.assertNotIn(NEXT_LAYOUT_KEY, load_state(self.path)[0])
+
+    def test_no_match_and_failed_send_do_not_advance_layout(self) -> None:
+        self.run_at(10000)
+        self.run_at(10900)
+        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "wide")
+        self.faceit = FakeFaceit("next-match")
+        self.telegram.result = False
+        self.assertEqual(self.run_at(11800), 1)
+        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "wide")
+        self.telegram.result = True
+        self.assertEqual(self.run_at(12700), 0)
+        self.assertIn('<th>K/D Ratio</th>', self.telegram.messages[-1])
+        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "two_rows")
+
+    def test_pending_edits_keep_each_layout_and_do_not_advance_sequence(self) -> None:
+        self.run_at(10000)
+        self.faceit = FakeFaceit("next-match")
+        self.run_at(10900)
+        state, _ = load_state(self.path)
+        self.assertEqual(state[PENDING_MESSAGES_KEY]["new-match"]["layout"], "two_rows")
+        self.assertEqual(state[PENDING_MESSAGES_KEY]["next-match"]["layout"], "wide")
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, .03)}
+        self.run_at(11800)
+        edits = {mid: text for mid, text, _ in self.telegram.edits}
+        self.assertIn('rowspan="2"', edits[1])
+        self.assertNotIn('rowspan="2"', edits[2])
+        self.assertIn('<td>🟢 1.50</td><td>💚 +3.00%</td>', edits[2])
+        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "two_rows")
+        self.assertEqual(len(self.telegram.messages), 2)
+
+    def test_old_pending_records_without_layout_use_two_rows(self) -> None:
+        self.run_at(10000)
+        state, _ = load_state(self.path)
+        del state[PENDING_MESSAGES_KEY]["new-match"]["layout"]
+        del state[NEXT_LAYOUT_KEY]
+        self.path.write_text(json.dumps(state), encoding="utf-8")
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, .03)}
+        self.run_at(10900)
+        self.assertIn('rowspan="2"', self.telegram.edits[-1][1])
+        self.assertNotIn(NEXT_LAYOUT_KEY, load_state(self.path)[0])
+
+    def test_invalid_layout_state_is_rejected(self) -> None:
+        self.path.write_text(json.dumps({NEXT_LAYOUT_KEY: "bad-layout"}))
+        with self.assertRaises(StateError):
+            self.run_at(10000)
+        self.assertEqual(self.telegram.messages, [])
+        self.path.write_text(json.dumps({PLAYER_ID: "old-match"}))
+        self.run_at(10000)
+        state, _ = load_state(self.path)
+        state[PENDING_MESSAGES_KEY]["new-match"]["layout"] = "bad-layout"
+        self.path.write_text(json.dumps(state))
+        with self.assertRaises(StateError):
+            load_state(self.path)
+
+    def test_multiple_new_matches_in_one_run_alternate(self) -> None:
+        from dataclasses import replace
+        self.config = replace(self.config, players={PLAYER_ID: "One", SECOND_PLAYER_ID: "Two"})
+        self.path.write_text(json.dumps({PLAYER_ID: "old-1", SECOND_PLAYER_ID: "old-2"}))
+        with patch.object(self.faceit, "latest_match", side_effect=[
+            LatestMatchResult(ok=True, match_id="match-1"),
+            LatestMatchResult(ok=True, match_id="match-2"),
+        ]):
+            self.assertEqual(self.run_at(10000), 0)
+        self.assertEqual(len(self.telegram.messages), 2)
+        self.assertIn('rowspan="2"', self.telegram.messages[0])
+        self.assertIn('<th>K/D Ratio</th>', self.telegram.messages[1])
+        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "two_rows")
 
     def test_updates_original_message_after_restart_without_resending(self) -> None:
         self.assertEqual(self.run_at(10000), 0)
