@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 from bot import (
     Config,
     PENDING_MESSAGES_KEY,
-    NEXT_LAYOUT_KEY,
     StateError,
     ConfigurationError,
     FaceitRating,
@@ -248,20 +247,20 @@ class ConfigurationTests(unittest.TestCase):
             {PLAYER_ID: "<b>Player & One</b>"}, "cs2", ZoneInfo("UTC"),
             {PLAYER_ID: FaceitRating(1.92, 0.093)},
         )
-        self.assertIn("<table bordered compact>", message)
+        self.assertIn("<table bordered striped compact>", message)
         self.assertNotIn("🎮 FACEIT", message)
         self.assertTrue(message.startswith("<h2>🎮 &lt;b&gt;map&lt;/b&gt; · 13:10</h2>"))
         self.assertEqual(message.count("<table "), 1)
         self.assertNotIn("<details>", message)
         self.assertNotIn("━", message)
         self.assertNotIn('colspan="4"', message)
-        self.assertIn('<th>Игрок</th><th colspan="3">Статистика</th>', message)
-        self.assertIn('<td rowspan="2" valign="middle">&lt;b&gt;Player &amp; One&lt;/b&gt;</td>', message)
-        self.assertIn("<td><b>Rating</b><br>🟠 1.92</td><td><b>Swing</b><br>💚 +9.30%</td>", message)
-        self.assertIn("<td><b>K/D</b><br>20/10</td></tr><tr><td><b>K/D Ratio</b><br>2.0</td>", message)
-        self.assertIn("<td><b>ADR</b><br>&lt;bad&gt;</td>", message)
+        self.assertIn('<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>', message)
+        self.assertIn('<td>&lt;b&gt;Player &amp; One&lt;/b&gt;</td>', message)
+        self.assertIn("<td>🟠 1.92</td><td>💚 +9.30%</td>", message)
+        self.assertIn("<td>20/10</td><td>2.0</td>", message)
+        self.assertIn("<td>&lt;bad&gt;</td>", message)
         self.assertNotIn("<b>map</b>", message)
-        self.assertEqual(message.count("<tr>"), 3)
+        self.assertEqual(message.count("<tr>"), 2)
 
     def test_table_missing_ratings_use_merged_status_or_dashes(self) -> None:
         faceit = FakeFaceit("test-match")
@@ -272,8 +271,8 @@ class ConfigurationTests(unittest.TestCase):
         )
         waiting = build_message(*args, rating_status="⏳ Rating и Swing рассчитываются")
         self.assertIn('<td colspan="2">⏳ Rating и Swing рассчитываются</td>', waiting)
-        self.assertIn("<td><b>K/D</b><br>20/10</td>", waiting)
-        self.assertIn("<td><b>Rating</b><br>—</td><td><b>Swing</b><br>—</td>", build_message(*args))
+        self.assertIn("<td>20/10</td>", waiting)
+        self.assertIn("<td>—</td><td>—</td>", build_message(*args))
 
     def test_wide_table_has_one_row_per_player_and_escapes_values(self) -> None:
         faceit = FakeFaceit("test-match")
@@ -281,15 +280,15 @@ class ConfigurationTests(unittest.TestCase):
         stats["rounds"][0]["teams"][0]["players"][0]["player_stats"]["ADR"] = "<bad>"
         args = ("test-match", faceit.match_details("test-match"), stats,
                 {PLAYER_ID: "Player<One>"}, "cs2", ZoneInfo("UTC"))
-        text = build_message(*args, {PLAYER_ID: FaceitRating(1.55, -.01)}, layout="wide")
+        text = build_message(*args, {PLAYER_ID: FaceitRating(1.55, -.01)})
         self.assertEqual(text.count("<tr>"), 2)
         self.assertNotIn("rowspan", text)
         self.assertNotIn("<details>", text)
         self.assertIn("<th>Rating</th><th>Swing</th><th>K/D</th><th>K/D Ratio</th>", text)
         self.assertIn("<td>Player&lt;One&gt;</td><td>🟢 1.55</td><td>🔻 -1.00%</td><td>20/10</td>", text)
         self.assertIn("<td>&lt;bad&gt;</td>", text)
-        self.assertIn("<td>—</td><td>—</td>", build_message(*args, layout="wide"))
-        waiting = build_message(*args, rating_status="⏳ Rating и Swing рассчитываются", layout="wide")
+        self.assertIn("<td>—</td><td>—</td>", build_message(*args))
+        waiting = build_message(*args, rating_status="⏳ Rating и Swing рассчитываются")
         self.assertIn('<td colspan="2">⏳ Rating и Swing рассчитываются</td>', waiting)
         self.assertIn("<td>20/10</td>", waiting)
 
@@ -328,7 +327,7 @@ class ConfigurationTests(unittest.TestCase):
 
         self.assertEqual(
             line,
-            "<td><b>Rating</b><br>⚪ 1.07</td><td><b>Swing</b><br>🔻 -0.71%</td>",
+            "<td>⚪ 1.07</td><td>🔻 -0.71%</td>",
         )
 
     def test_match_result_uses_first_configured_player_and_is_shown_once(self) -> None:
@@ -402,9 +401,9 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(
                     format_faceit_rating(FaceitRating(value, 0.0)),
-                    f"<td><b>Rating</b><br>{marker} {displayed}</td><td><b>Swing</b><br>+0.00%</td>",
+                    f"<td>{marker} {displayed}</td><td>+0.00%</td>",
                 )
-        self.assertEqual(format_faceit_rating(None), "<td><b>Rating</b><br>—</td><td><b>Swing</b><br>—</td>")
+        self.assertEqual(format_faceit_rating(None), "<td>—</td><td>—</td>")
 
     def test_players_are_sorted_by_rating_with_kd_fallback(self) -> None:
         match_details = {
@@ -472,11 +471,11 @@ class ConfigurationTests(unittest.TestCase):
             (message_by_rating, "HighRating", "HighKD"),
             (message_by_kd, "HighKD", "HighRating"),
         ):
-            self.assertEqual(message.count('rowspan="2"'), 2)
-            self.assertEqual(message.count("<tr>"), 5)
+            self.assertNotIn("rowspan", message)
+            self.assertEqual(message.count("<tr>"), 3)
             first_block = message[message.index(first):message.index(second)]
-            self.assertIn("<b>K/D Ratio</b>", first_block)
-            self.assertIn("<b>MVP</b>", first_block)
+            self.assertIn("<td>", first_block)
+            self.assertIn("</tr>", first_block)
 
 
 class PollingTests(unittest.TestCase):
@@ -613,10 +612,10 @@ class PollingTests(unittest.TestCase):
             self.assertEqual(result, 0)
             message = telegram.messages[0]
             rating_line = (
-                "<td><b>Rating</b><br>🟢 1.55</td><td><b>Swing</b><br>💚 +7.24%</td>"
+                "<td>🟢 1.55</td><td>💚 +7.24%</td>"
             )
             self.assertIn(rating_line, message)
-            self.assertLess(message.index(rating_line), message.index("<td><b>K/D</b><br>20/10</td>"))
+            self.assertLess(message.index(rating_line), message.index("<td>20/10</td>"))
             self.assertEqual(flaresolverr.requests, [("new-match", "cs2")])
 
     def test_missing_optional_rating_does_not_block_message(self) -> None:
@@ -690,76 +689,78 @@ class PendingMessageTests(unittest.TestCase):
         with patch("bot.time.time", return_value=timestamp):
             return run_once(self.config, self.faceit, self.telegram, self.provider)
 
-    def test_new_matches_alternate_across_runs_without_pending_jobs(self) -> None:
+    def test_all_new_matches_use_wide_layout_across_runs(self) -> None:
         self.provider = FakeFlareSolverr({PLAYER_ID: FaceitRating(1.5, .03)})
-        for index, expected_next in enumerate(("wide", "two_rows", "wide")):
+        for index in range(3):
             self.faceit = FakeFaceit(f"match-{index}")
             self.assertEqual(self.run_at(10000 + index * 900), 0)
             text = self.telegram.messages[-1]
-            self.assertEqual('rowspan="2"' in text, index != 1)
-            self.assertEqual('<th>K/D Ratio</th>' in text, index == 1)
-            self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], expected_next)
+            self.assertNotIn("rowspan", text)
+            self.assertIn("<th>K/D Ratio</th>", text)
+            self.assertEqual(text.count("<tr>"), 2)
+            self.assertNotIn("__next_message_layout__", load_state(self.path)[0])
 
-    def test_baseline_does_not_advance_layout(self) -> None:
+    def test_baseline_does_not_send_or_store_layout(self) -> None:
         self.path.unlink()
         self.run_at(10000)
         self.assertEqual(self.telegram.messages, [])
-        self.assertNotIn(NEXT_LAYOUT_KEY, load_state(self.path)[0])
+        self.assertNotIn("__next_message_layout__", load_state(self.path)[0])
 
-    def test_no_match_and_failed_send_do_not_advance_layout(self) -> None:
-        self.run_at(10000)
-        self.run_at(10900)
-        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "wide")
-        self.faceit = FakeFaceit("next-match")
-        self.telegram.result = False
-        self.assertEqual(self.run_at(11800), 1)
-        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "wide")
-        self.telegram.result = True
-        self.assertEqual(self.run_at(12700), 0)
-        self.assertIn('<th>K/D Ratio</th>', self.telegram.messages[-1])
-        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "two_rows")
+    def test_legacy_state_next_layout_does_not_affect_new_sends(self) -> None:
+        for old_layout in ("two_rows", "wide"):
+            with self.subTest(old_layout=old_layout):
+                self.path.write_text(json.dumps({
+                    PLAYER_ID: "old-match", "__next_message_layout__": old_layout,
+                }), encoding="utf-8")
+                self.assertEqual(self.run_at(10000), 0)
+                self.assertNotIn("rowspan", self.telegram.messages[-1])
+                self.assertIn("<th>K/D Ratio</th>", self.telegram.messages[-1])
+                saved = json.loads(self.path.read_text(encoding="utf-8"))
+                self.assertEqual(saved[PLAYER_ID], "new-match")
+                self.assertNotIn("__next_message_layout__", saved)
+                self.assertNotIn("layout", saved[PENDING_MESSAGES_KEY]["new-match"])
 
-    def test_pending_edits_keep_each_layout_and_do_not_advance_sequence(self) -> None:
+    def test_old_pending_messages_become_wide_without_resending(self) -> None:
         self.run_at(10000)
         self.faceit = FakeFaceit("next-match")
         self.run_at(10900)
         state, _ = load_state(self.path)
-        self.assertEqual(state[PENDING_MESSAGES_KEY]["new-match"]["layout"], "two_rows")
-        self.assertEqual(state[PENDING_MESSAGES_KEY]["next-match"]["layout"], "wide")
+        state["__next_message_layout__"] = "two_rows"
+        for match_id, old_layout in (("new-match", "two_rows"), ("next-match", "wide")):
+            state[PENDING_MESSAGES_KEY][match_id]["layout"] = old_layout
+            state[PENDING_MESSAGES_KEY][match_id]["last_text"] = "old saved message"
+        self.path.write_text(json.dumps(state), encoding="utf-8")
         self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, .03)}
         self.run_at(11800)
         edits = {mid: text for mid, text, _ in self.telegram.edits}
-        self.assertIn('rowspan="2"', edits[1])
-        self.assertNotIn('rowspan="2"', edits[2])
-        self.assertIn('<td>🟢 1.50</td><td>💚 +3.00%</td>', edits[2])
-        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "two_rows")
+        self.assertEqual(set(edits), {1, 2})
+        for text in edits.values():
+            self.assertNotIn("rowspan", text)
+            self.assertIn("<td>🟢 1.50</td><td>💚 +3.00%</td>", text)
         self.assertEqual(len(self.telegram.messages), 2)
+        self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 
-    def test_old_pending_records_without_layout_use_two_rows(self) -> None:
+    def test_legacy_migration_preserves_queue_on_failed_edit(self) -> None:
         self.run_at(10000)
         state, _ = load_state(self.path)
-        del state[PENDING_MESSAGES_KEY]["new-match"]["layout"]
-        del state[NEXT_LAYOUT_KEY]
+        record = state[PENDING_MESSAGES_KEY]["new-match"]
+        record["layout"] = "two_rows"
+        record["last_text"] = "old compact message"
         self.path.write_text(json.dumps(state), encoding="utf-8")
-        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, .03)}
-        self.run_at(10900)
-        self.assertIn('rowspan="2"', self.telegram.edits[-1][1])
-        self.assertNotIn(NEXT_LAYOUT_KEY, load_state(self.path)[0])
+        self.telegram.edit_ok = False
+        self.assertEqual(self.run_at(10900), 1)
+        saved = load_state(self.path)[0][PENDING_MESSAGES_KEY]["new-match"]
+        self.assertEqual(saved["message_id"], record["message_id"])
+        self.assertEqual(saved["chat_id"], record["chat_id"])
+        self.assertEqual(saved["sent_at"], record["sent_at"])
+        self.assertEqual(saved["last_text"], "old compact message")
+        self.assertNotIn("layout", saved)
+        self.telegram.edit_ok = True
+        self.assertEqual(self.run_at(11800), 0)
+        self.assertIn("<th>K/D Ratio</th>", self.telegram.edits[-1][1])
+        self.assertEqual(len(self.telegram.messages), 1)
 
-    def test_invalid_layout_state_is_rejected(self) -> None:
-        self.path.write_text(json.dumps({NEXT_LAYOUT_KEY: "bad-layout"}))
-        with self.assertRaises(StateError):
-            self.run_at(10000)
-        self.assertEqual(self.telegram.messages, [])
-        self.path.write_text(json.dumps({PLAYER_ID: "old-match"}))
-        self.run_at(10000)
-        state, _ = load_state(self.path)
-        state[PENDING_MESSAGES_KEY]["new-match"]["layout"] = "bad-layout"
-        self.path.write_text(json.dumps(state))
-        with self.assertRaises(StateError):
-            load_state(self.path)
-
-    def test_multiple_new_matches_in_one_run_alternate(self) -> None:
+    def test_multiple_new_matches_in_one_run_are_all_wide(self) -> None:
         from dataclasses import replace
         self.config = replace(self.config, players={PLAYER_ID: "One", SECOND_PLAYER_ID: "Two"})
         self.path.write_text(json.dumps({PLAYER_ID: "old-1", SECOND_PLAYER_ID: "old-2"}))
@@ -769,9 +770,9 @@ class PendingMessageTests(unittest.TestCase):
         ]):
             self.assertEqual(self.run_at(10000), 0)
         self.assertEqual(len(self.telegram.messages), 2)
-        self.assertIn('rowspan="2"', self.telegram.messages[0])
-        self.assertIn('<th>K/D Ratio</th>', self.telegram.messages[1])
-        self.assertEqual(load_state(self.path)[0][NEXT_LAYOUT_KEY], "two_rows")
+        for text in self.telegram.messages:
+            self.assertNotIn("rowspan", text)
+            self.assertIn("<th>K/D Ratio</th>", text)
 
     def test_updates_original_message_after_restart_without_resending(self) -> None:
         self.assertEqual(self.run_at(10000), 0)
@@ -783,7 +784,7 @@ class PendingMessageTests(unittest.TestCase):
         self.assertEqual(self.run_at(10900), 0)
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertEqual(self.telegram.edits[0][0], 1)
-        self.assertIn("<td><b>Swing</b><br>+0.00%</td>", self.telegram.edits[0][1])
+        self.assertIn("<td>+0.00%</td>", self.telegram.edits[0][1])
         self.assertNotIn("рассчитываются", self.telegram.edits[0][1])
         state, _ = load_state(self.path)
         self.assertEqual(state[PENDING_MESSAGES_KEY], {})
@@ -812,7 +813,7 @@ class PendingMessageTests(unittest.TestCase):
         self.assertEqual(self.run_at(10900), 0)
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertEqual(self.telegram.edits[0][0], 1)
-        self.assertIn("<table bordered compact>", self.telegram.edits[0][1])
+        self.assertIn("<table bordered striped compact>", self.telegram.edits[0][1])
         self.assertIn("new-match", load_state(self.path)[0][PENDING_MESSAGES_KEY])
 
     def test_unchanged_pending_message_is_not_edited(self) -> None:
@@ -863,7 +864,7 @@ class PendingMessageTests(unittest.TestCase):
         self.provider.ratings = {}
         self.telegram.edit_ok = True
         self.assertEqual(self.run_at(11800), 0)
-        self.assertIn("<td><b>Rating</b><br>🟢 1.50</td><td><b>Swing</b><br>💚 +3.00%</td>", self.telegram.edits[-1][1])
+        self.assertIn("<td>🟢 1.50</td><td>💚 +3.00%</td>", self.telegram.edits[-1][1])
         self.assertEqual(len(self.telegram.messages), 1)
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 
@@ -889,8 +890,8 @@ class PendingMessageTests(unittest.TestCase):
         self.provider.ratings = {PLAYER_ID: FaceitRating(1.1, -0.01)}
         self.run_at(11800)
         text = self.telegram.edits[-1][1]
-        self.assertIn("<td><b>Rating</b><br>🟠 3.00</td>", text)
-        self.assertIn("<td><b>Rating</b><br>⚪ 1.10</td>", text)
+        self.assertIn("<td>🟠 3.00</td>", text)
+        self.assertIn("<td>⚪ 1.10</td>", text)
         self.assertNotIn("рассчитываются", text)
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
 

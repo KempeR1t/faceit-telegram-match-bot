@@ -31,15 +31,13 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 RATING_UPDATE_WINDOW_SECONDS = 2 * 60 * 60
 PENDING_MESSAGES_KEY = "__pending_messages__"
-NEXT_LAYOUT_KEY = "__next_message_layout__"
-MESSAGE_LAYOUTS = ("two_rows", "wide")
 LOGGER = logging.getLogger("faceit_match_bot")
 
 
@@ -850,8 +848,6 @@ def valid_pending_messages(value: Any) -> bool:
     for match_id, item in value.items():
         if not isinstance(match_id, str) or not isinstance(item, dict):
             return False
-        if item.get("layout", "two_rows") not in MESSAGE_LAYOUTS:
-            return False
         if (type(item.get("message_id")) is not int or item["message_id"] <= 0
                 or finite_float(item.get("sent_at")) is None
                 or not all(isinstance(item.get(key), str) for key in
@@ -898,8 +894,11 @@ def load_state(state_file: Path) -> tuple[dict[str, Any], bool]:
     ):
         raise StateError(f"State file {state_file} has an unexpected format.")
 
-    if payload.get(NEXT_LAYOUT_KEY, "two_rows") not in MESSAGE_LAYOUTS:
-        raise StateError(f"State file {state_file} has an invalid message layout.")
+    # Older versions alternated layouts; preserve match history and update jobs,
+    # but discard obsolete presentation metadata on the next state write.
+    payload.pop("__next_message_layout__", None)
+    for item in payload.get(PENDING_MESSAGES_KEY, {}).values():
+        item.pop("layout", None)
     return dict(payload), False
 
 
@@ -964,11 +963,9 @@ def escaped(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
-def format_faceit_rating(rating: FaceitRating | None, *, labels: bool = True) -> str:
-    rating_label = "<b>Rating</b><br>" if labels else ""
-    swing_label = "<b>Swing</b><br>" if labels else ""
+def format_faceit_rating(rating: FaceitRating | None) -> str:
     if rating is None:
-        return f"<td>{rating_label}—</td><td>{swing_label}—</td>"
+        return "<td>—</td><td>—</td>"
     # Classify the displayed value so rounding cannot contradict the marker.
     rating_text = f"{rating.rating:.2f}"
     displayed_rating = float(rating_text)
@@ -990,8 +987,8 @@ def format_faceit_rating(rating: FaceitRating | None, *, labels: bool = True) ->
     else:
         swing_marker = ""
     return (
-        f"<td>{rating_label}{rating_marker} {rating_text}</td>"
-        f"<td>{swing_label}{swing_marker}{swing_percent:+.2f}%</td>"
+        f"<td>{rating_marker} {rating_text}</td>"
+        f"<td>{swing_marker}{swing_percent:+.2f}%</td>"
     )
 
 
@@ -1004,11 +1001,7 @@ def build_message(
     app_timezone: ZoneInfo,
     faceit_ratings: dict[str, FaceitRating] | None = None,
     rating_status: str | None = None,
-    *, layout: str = "two_rows",
 ) -> str | None:
-    if layout not in MESSAGE_LAYOUTS:
-        raise ValueError("Unknown message layout")
-    two_rows = layout == "two_rows"
     rounds = stats_data.get("rounds")
     if not isinstance(rounds, list) or not rounds or not isinstance(rounds[0], dict):
         LOGGER.warning("FACEIT match statistics do not contain round data.")
@@ -1071,7 +1064,7 @@ def build_message(
                 player_stats = {}
             nickname = escaped(players[player_id])
             player_rating = (faceit_ratings or {}).get(player_id)
-            rating_line = format_faceit_rating(player_rating, labels=two_rows)
+            rating_line = format_faceit_rating(player_rating)
             if player_rating is None and rating_status:
                 rating_line = f'<td colspan="2">{escaped(rating_status)}</td>'
             kd_value = finite_float(player_stats.get("K/D Ratio"))
@@ -1081,25 +1074,14 @@ def build_message(
                 else (kd_value if kd_value is not None else 0.0)
             )
 
-            if two_rows:
-                player_block = (
-                    f'<tr><td rowspan="2" valign="middle">{nickname}</td>'
-                    f"{rating_line}"
-                    f"<td><b>K/D</b><br>{escaped(player_stats.get('Kills', '0'))}/"
-                    f"{escaped(player_stats.get('Deaths', '0'))}</td></tr><tr>"
-                    f"<td><b>K/D Ratio</b><br>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
-                    f"<td><b>ADR</b><br>{escaped(player_stats.get('ADR', '0'))}</td>"
-                    f"<td><b>MVP</b><br>{escaped(player_stats.get('MVPs', '0'))}</td></tr>"
-                )
-            else:
-                player_block = (
-                    f"<tr><td>{nickname}</td>{rating_line}"
-                    f"<td>{escaped(player_stats.get('Kills', '0'))}/"
-                    f"{escaped(player_stats.get('Deaths', '0'))}</td>"
-                    f"<td>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
-                    f"<td>{escaped(player_stats.get('ADR', '0'))}</td>"
-                    f"<td>{escaped(player_stats.get('MVPs', '0'))}</td></tr>"
-                )
+            player_block = (
+                f"<tr><td>{nickname}</td>{rating_line}"
+                f"<td>{escaped(player_stats.get('Kills', '0'))}/"
+                f"{escaped(player_stats.get('Deaths', '0'))}</td>"
+                f"<td>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
+                f"<td>{escaped(player_stats.get('ADR', '0'))}</td>"
+                f"<td>{escaped(player_stats.get('MVPs', '0'))}</td></tr>"
+            )
             player_blocks.append((sort_value, player_order[player_id], player_block))
 
     if not player_blocks:
@@ -1128,8 +1110,6 @@ def build_message(
         f"{quote(match_id, safe='-')}/scoreboard"
     )
     table_header = (
-        '<table bordered compact><tr><th>Игрок</th><th colspan="3">Статистика</th></tr>'
-        if two_rows else
         '<table bordered striped compact><tr><th>Игрок</th><th>Rating</th>'
         '<th>Swing</th><th>K/D</th><th>K/D Ratio</th><th>ADR</th><th>MVP</th></tr>'
     )
@@ -1194,7 +1174,6 @@ def update_pending_messages(
         text = build_message(
             match_id, item["details"], item["stats"], item["players"],
             item["game_id"], ZoneInfo(item["timezone"]), ratings, status,
-            layout=item.get("layout", "two_rows"),
         )
         if text is None:
             raise StateError(f"Cannot rebuild pending message for match {match_id}.")
@@ -1318,7 +1297,6 @@ def _run_once(
             pid not in faceit_ratings for pid in match_players
         )
 
-        layout = state.get(NEXT_LAYOUT_KEY, "two_rows")
         message = build_message(
             match_id,
             match_details,
@@ -1328,7 +1306,6 @@ def _run_once(
             config.timezone,
             faceit_ratings,
             "⏳ Rating и Swing рассчитываются" if waiting else None,
-            layout=layout,
         )
         if message is None:
             had_error = True
@@ -1339,15 +1316,12 @@ def _run_once(
             had_error = True
             continue
 
-        # Advance only on successful new sends, never on retries or edits.
-        state[NEXT_LAYOUT_KEY] = "wide" if layout == "two_rows" else "two_rows"
         if waiting:
             pending[match_id] = {
                 "message_id": message_id, "chat_id": config.telegram_chat_id,
                 "sent_at": time.time(), "game_id": config.game_id,
                 "timezone": config.timezone_name, "details": match_details,
                 "stats": stats_data, "players": match_players, "last_text": message,
-                "layout": layout,
                 "ratings": {
                     pid: {"rating": rating.rating, "swing": rating.swing}
                     for pid, rating in faceit_ratings.items() if pid in match_players
