@@ -248,15 +248,18 @@ class ConfigurationTests(unittest.TestCase):
             {PLAYER_ID: FaceitRating(1.92, 0.093)},
         )
         self.assertIn("<table bordered striped compact>", message)
-        self.assertIn(
-            "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>"
-            "<th>K/D r</th><th>ADR</th><th>MVP</th>", message,
-        )
+        upper, details = message.split("<details>")
+        self.assertIn("<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>", upper)
+        self.assertNotIn("<th>ADR</th>", upper)
+        self.assertNotIn("<th>K/D Ratio</th>", upper)
+        self.assertIn("<summary>K/D Ratio, ADR и MVP</summary>", details)
+        self.assertIn("<th>Игрок</th><th>K/D Ratio</th><th>ADR</th><th>MVP</th>", details)
+        self.assertNotIn("<th>K/D</th>", details)
         self.assertIn("<td>&lt;b&gt;Player &amp; One&lt;/b&gt;</td>", message)
         self.assertIn("<td>🟠 1.92</td><td>💚 +9.30%</td><td>20/10</td>", message)
         self.assertIn("<td>&lt;bad&gt;</td>", message)
         self.assertNotIn("<b>map</b>", message)
-        self.assertEqual(message.count("<tr>"), 2)
+        self.assertEqual(message.count("<tr>"), 4)
 
     def test_table_missing_ratings_use_merged_status_or_dashes(self) -> None:
         faceit = FakeFaceit("test-match")
@@ -445,6 +448,12 @@ class ConfigurationTests(unittest.TestCase):
             message_by_kd.index("<td>HighKD</td>"),
             message_by_kd.index("<td>HighRating</td>"),
         )
+        for message, first, second in (
+            (message_by_rating, "HighRating", "HighKD"),
+            (message_by_kd, "HighKD", "HighRating"),
+        ):
+            details = message.split("<details>")[1]
+            self.assertLess(details.index(first), details.index(second))
 
 
 class PollingTests(unittest.TestCase):

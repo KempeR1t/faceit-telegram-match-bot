@@ -31,7 +31,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -1033,7 +1033,7 @@ def build_message(
         return None
 
     player_order = {player_id: index for index, player_id in enumerate(players)}
-    player_blocks: list[tuple[float, int, str]] = []
+    player_blocks: list[tuple[float, int, str, str]] = []
     tracked_player_wins: dict[str, bool] = {}
     for team in teams:
         if not isinstance(team, dict):
@@ -1076,7 +1076,8 @@ def build_message(
                     f"<tr><td>{nickname}</td>"
                     f"{rating_line}"
                     f"<td>{escaped(player_stats.get('Kills', '0'))}/"
-                    f"{escaped(player_stats.get('Deaths', '0'))}</td>"
+                    f"{escaped(player_stats.get('Deaths', '0'))}</td></tr>",
+                    f"<tr><td>{nickname}</td>"
                     f"<td>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
                     f"<td>{escaped(player_stats.get('ADR', '0'))}</td>"
                     f"<td>{escaped(player_stats.get('MVPs', '0'))}</td></tr>",
@@ -1113,9 +1114,12 @@ def build_message(
         f"<p>⏱ {escaped(start_text)}–{escaped(end_text)} · {escaped(duration_text)}<br>"
         f"🏁 Результат: {match_result}</p>"
         "<table bordered striped compact><tr>"
-        "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>"
-        "<th>K/D r</th><th>ADR</th><th>MVP</th></tr>"
-        f"{''.join(block for _, _, block in player_blocks)}</table>"
+        "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th></tr>"
+        f"{''.join(block for _, _, block, _ in player_blocks)}</table>"
+        "<details><summary>K/D Ratio, ADR и MVP</summary>"
+        "<table bordered striped compact><tr>"
+        "<th>Игрок</th><th>K/D Ratio</th><th>ADR</th><th>MVP</th></tr>"
+        f"{''.join(detail for _, _, _, detail in player_blocks)}</table></details>"
         f"<p>🔗 <a href=\"{escaped(room_url)}\">Открыть scoreboard</a></p>"
     )
 
