@@ -1110,7 +1110,7 @@ def build_message(
         f"{quote(match_id, safe='-')}/scoreboard"
     )
     return (
-        f"<h2>🎮 FACEIT · {escaped(map_name)} · {escaped(match_score)}</h2>"
+        f"<h2>🎮 {escaped(map_name)} · {escaped(match_score)}</h2>"
         f"<p>⏱ {escaped(start_text)}–{escaped(end_text)} · {escaped(duration_text)}<br>"
         f"🏁 Результат: {match_result}</p>"
         "<table bordered striped compact><tr>"

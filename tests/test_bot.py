@@ -248,6 +248,8 @@ class ConfigurationTests(unittest.TestCase):
             {PLAYER_ID: FaceitRating(1.92, 0.093)},
         )
         self.assertIn("<table bordered striped compact>", message)
+        self.assertNotIn("🎮 FACEIT", message)
+        self.assertTrue(message.startswith("<h2>🎮 &lt;b&gt;map&lt;/b&gt; · 13:10</h2>"))
         upper, details = message.split("<details>")
         self.assertIn("<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th>", upper)
         self.assertNotIn("<th>ADR</th>", upper)
