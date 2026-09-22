@@ -31,7 +31,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -960,7 +960,7 @@ def escaped(value: Any) -> str:
 
 def format_faceit_rating(rating: FaceitRating | None) -> str:
     if rating is None:
-        return "<td>—</td><td>—</td>"
+        return "<td><b>Rating</b><br>—</td><td><b>Swing</b><br>—</td>"
     # Classify the displayed value so rounding cannot contradict the marker.
     rating_text = f"{rating.rating:.2f}"
     displayed_rating = float(rating_text)
@@ -982,8 +982,8 @@ def format_faceit_rating(rating: FaceitRating | None) -> str:
     else:
         swing_marker = ""
     return (
-        f"<td>{rating_marker} {rating_text}</td>"
-        f"<td>{swing_marker}{swing_percent:+.2f}%</td>"
+        f"<td><b>Rating</b><br>{rating_marker} {rating_text}</td>"
+        f"<td><b>Swing</b><br>{swing_marker}{swing_percent:+.2f}%</td>"
     )
 
 
@@ -1033,7 +1033,7 @@ def build_message(
         return None
 
     player_order = {player_id: index for index, player_id in enumerate(players)}
-    player_blocks: list[tuple[float, int, str, str]] = []
+    player_blocks: list[tuple[float, int, str]] = []
     tracked_player_wins: dict[str, bool] = {}
     for team in teams:
         if not isinstance(team, dict):
@@ -1073,14 +1073,13 @@ def build_message(
                 (
                     sort_value,
                     player_order[player_id],
-                    f"<tr><td>{nickname}</td>"
+                    f'<tr><td rowspan="2" valign="middle">{nickname}</td>'
                     f"{rating_line}"
-                    f"<td>{escaped(player_stats.get('Kills', '0'))}/"
-                    f"{escaped(player_stats.get('Deaths', '0'))}</td></tr>",
-                    f"<tr><td>{nickname}</td>"
-                    f"<td>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
-                    f"<td>{escaped(player_stats.get('ADR', '0'))}</td>"
-                    f"<td>{escaped(player_stats.get('MVPs', '0'))}</td></tr>",
+                    f"<td><b>K/D</b><br>{escaped(player_stats.get('Kills', '0'))}/"
+                    f"{escaped(player_stats.get('Deaths', '0'))}</td></tr><tr>"
+                    f"<td><b>K/D Ratio</b><br>{escaped(player_stats.get('K/D Ratio', '0.0'))}</td>"
+                    f"<td><b>ADR</b><br>{escaped(player_stats.get('ADR', '0'))}</td>"
+                    f"<td><b>MVP</b><br>{escaped(player_stats.get('MVPs', '0'))}</td></tr>",
                 )
             )
 
@@ -1113,13 +1112,8 @@ def build_message(
         f"<h2>🎮 {escaped(map_name)} · {escaped(match_score)}</h2>"
         f"<p>⏱ {escaped(start_text)}–{escaped(end_text)} · {escaped(duration_text)}<br>"
         f"🏁 Результат: {match_result}</p>"
-        "<table bordered striped compact><tr>"
-        "<th>Игрок</th><th>Rating</th><th>Swing</th><th>K/D</th></tr>"
-        f"{''.join(block for _, _, block, _ in player_blocks)}</table>"
-        "<details><summary>K/D Ratio, ADR и MVP</summary>"
-        "<table bordered striped compact><tr>"
-        "<th>Игрок</th><th>K/D Ratio</th><th>ADR</th><th>MVP</th></tr>"
-        f"{''.join(detail for _, _, _, detail in player_blocks)}</table></details>"
+        '<table bordered compact><tr><th>Игрок</th><th colspan="3">Статистика</th></tr>'
+        f"{''.join(block for _, _, block in player_blocks)}</table>"
         f"<p>🔗 <a href=\"{escaped(room_url)}\">Открыть scoreboard</a></p>"
     )
 
