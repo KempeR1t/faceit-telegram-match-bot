@@ -38,6 +38,7 @@ FACEIT_WEB_BASE = "https://www.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 RATING_UPDATE_WINDOW_SECONDS = 2 * 60 * 60
 PENDING_MESSAGES_KEY = "__pending_messages__"
+SENT_MATCHES_KEY = "__sent_matches__"
 LOGGER = logging.getLogger("faceit_match_bot")
 
 
@@ -151,6 +152,13 @@ class Config:
 class LatestMatchResult:
     ok: bool
     match_id: str | None
+
+
+@dataclass(frozen=True)
+class MatchHistoryResult:
+    ok: bool
+    # Oldest first, so a failed older match cannot be lost behind a newer cursor.
+    matches: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -435,6 +443,46 @@ class FaceitClient:
             params=None,
             operation="match details lookup",
         )
+
+    def matches_since(self, player_id: str, game_id: str,
+                      previous_match_id: str) -> MatchHistoryResult:
+        """Read every completed match after the cursor, with bounded pagination.
+
+        If a nonempty cursor cannot be found, fail rather than silently skipping
+        matches or sending a player's entire history.
+        """
+        found: dict[str, float] = {}
+        page_size = 100
+        for offset in range(0, 10000, page_size):
+            payload = self._get_json(
+                f"/players/{quote(player_id, safe='-')}/history",
+                params={"game": game_id, "limit": page_size, "offset": offset},
+                operation="player history catch-up",
+            )
+            if payload is None or not isinstance(payload.get("items"), list):
+                return MatchHistoryResult(ok=False)
+            items = payload["items"]
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("match_id"), str):
+                    LOGGER.warning("FACEIT history contains an invalid match ID.")
+                    return MatchHistoryResult(ok=False)
+                match_id = item["match_id"]
+                if match_id == previous_match_id:
+                    return MatchHistoryResult(True, tuple(sorted(found.items(), key=lambda x: (x[1], x[0]))))
+                if str(item.get("status", "")).lower() != "finished":
+                    continue
+                finished = finite_float(item.get("finished_at"))
+                if not match_id or finished is None or finished <= 0:
+                    LOGGER.warning("FACEIT history contains an invalid completion time.")
+                    return MatchHistoryResult(ok=False)
+                found[match_id] = finished
+            if len(items) < page_size:
+                if not previous_match_id:
+                    return MatchHistoryResult(True, tuple(sorted(found.items(), key=lambda x: (x[1], x[0]))))
+                LOGGER.warning("Saved FACEIT match cursor was not found; state preserved.")
+                return MatchHistoryResult(ok=False)
+        LOGGER.warning("FACEIT history catch-up exceeded its pagination limit; state preserved.")
+        return MatchHistoryResult(ok=False)
 
     def match_stats(self, match_id: str) -> dict[str, Any] | None:
         return self._get_json(
@@ -889,8 +937,10 @@ def load_state(state_file: Path) -> tuple[dict[str, Any], bool]:
 
     if not isinstance(payload, dict) or not all(
         isinstance(key, str) and (
-            isinstance(value, str) if key != PENDING_MESSAGES_KEY
-            else valid_pending_messages(value)
+            valid_pending_messages(value) if key == PENDING_MESSAGES_KEY
+            else (isinstance(value, list) and all(isinstance(mid, str) and mid for mid in value)
+                  and len(value) == len(set(value))) if key == SENT_MATCHES_KEY
+            else isinstance(value, str)
         )
         for key, value in payload.items()
     ):
@@ -1240,58 +1290,76 @@ def _run_once(
     state, is_new_state_file = load_state(config.state_file)
     pending = state.get(PENDING_MESSAGES_KEY, {})
     previous_pending_ids = list(pending)
-    latest_by_player: dict[str, str | None] = {}
+    queues: dict[str, list[str]] = {}
+    match_times: dict[str, float] = {}
+    sent_matches = set(state.get(SENT_MATCHES_KEY, []))
+    # These messages are already delivered even when optional ratings are pending.
+    sent_matches.update(pending)
+    if sent_matches != set(state.get(SENT_MATCHES_KEY, [])):
+        state[SENT_MATCHES_KEY] = sorted(sent_matches)
+        save_state(config.state_file, state)
     had_error = False
-
-    for player_id, nickname in config.players.items():
-        result = faceit.latest_match(player_id, config.game_id)
-        if not result.ok:
-            LOGGER.warning("Could not read the latest match for %s.", nickname)
-            had_error = True
-            continue
-        latest_by_player[player_id] = result.match_id
-
     baseline_count = 0
-    if not config.notify_on_first_run:
-        for player_id, match_id in latest_by_player.items():
-            if player_id not in state:
-                # An empty value records that the player had no matches when
-                # added. Their first future match will still trigger a message.
-                state[player_id] = match_id or ""
+    for player_id, nickname in config.players.items():
+        if player_id not in state:
+            latest = faceit.latest_match(player_id, config.game_id)
+            if not latest.ok:
+                had_error = True
+                continue
+            if not config.notify_on_first_run:
+                state[player_id] = latest.match_id or ""
                 baseline_count += 1
+                continue
+            matches = [(latest.match_id, 0.0)] if latest.match_id else []
+        else:
+            history = faceit.matches_since(player_id, config.game_id, state[player_id])
+            if not history.ok:
+                LOGGER.warning("Could not read all new matches for %s; cursor preserved.", nickname)
+                had_error = True
+                continue
+            matches = list(history.matches)
+        queues[player_id] = [mid for mid, _ in matches]
+        for mid, finished in matches:
+            match_times[mid] = finished
+
+    if baseline_count:
+        LOGGER.info("Created a baseline for %s new player(s); no old match was sent.", baseline_count)
+    if had_error:
+        # Without complete history, global chronological order cannot be known.
         if baseline_count:
-            LOGGER.info(
-                "Created a baseline for %s new player(s); no old match was sent.",
-                baseline_count,
-            )
+            save_state(config.state_file, state)
+        return 1
 
-    pending_match_ids: list[str] = []
-    seen_match_ids: set[str] = set()
-    for player_id in config.players:
-        if player_id not in latest_by_player:
-            continue
-        match_id = latest_by_player[player_id]
-        if not match_id or state.get(player_id) == match_id:
-            continue
-        if match_id not in seen_match_ids:
-            pending_match_ids.append(match_id)
-            seen_match_ids.add(match_id)
-
-    if pending_match_ids:
-        LOGGER.info("Found %s pending match(es).", len(pending_match_ids))
+    pending_match_ids = sorted(match_times, key=lambda mid: (match_times[mid], mid))
+    new_match_count = sum(mid not in sent_matches for mid in pending_match_ids)
+    if new_match_count:
+        LOGGER.info("Found %s pending match(es).", new_match_count)
     else:
         LOGGER.info("No new matches found.")
 
+    def advance_cursors(match_id: str) -> bool:
+        advanced = False
+        for pid, queue in queues.items():
+            if queue and queue[0] == match_id:
+                queue.pop(0)
+                state[pid] = match_id
+                advanced = True
+        return advanced
+
     for match_id in pending_match_ids:
+        if match_id in sent_matches:
+            if advance_cursors(match_id):
+                save_state(config.state_file, state)
+            continue
         match_details = faceit.match_details(match_id)
         if match_details is None:
             had_error = True
-            continue
+            break
 
         stats_data = faceit.match_stats(match_id)
         if stats_data is None:
             had_error = True
-            continue
+            break
 
         faceit_ratings = ratings_for_match(flaresolverr, match_id, config.game_id)
         match_players = tracked_match_players(stats_data, config.players)
@@ -1311,12 +1379,12 @@ def _run_once(
         )
         if message is None:
             had_error = True
-            continue
+            break
 
         message_id = telegram.send_message(message)
         if not message_id:
             had_error = True
-            continue
+            break
 
         if waiting:
             pending[match_id] = {
@@ -1330,9 +1398,9 @@ def _run_once(
                 },
             }
             state[PENDING_MESSAGES_KEY] = pending
-        for player_id, latest_match_id in latest_by_player.items():
-            if latest_match_id == match_id:
-                state[player_id] = match_id
+        sent_matches.add(match_id)
+        state[SENT_MATCHES_KEY] = sorted(sent_matches)
+        advance_cursors(match_id)
         # Persist each successful send together with its update job.
         save_state(config.state_file, state)
         LOGGER.info("Sent a notification for match %s.", match_id)

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bot import LatestMatchResult, build_http_session
+from bot import MatchHistoryResult, build_http_session
 from test_bot import PLAYER_ID, SECOND_PLAYER_ID, make_config
 
 spec = importlib.util.spec_from_file_location(
@@ -33,7 +33,7 @@ class DeploymentTests(unittest.TestCase):
             config.players[SECOND_PLAYER_ID] = "Player Two"
             output = io.StringIO()
             with patch.object(preview.Config, "from_env", return_value=config), \
-                    patch.object(preview.FaceitClient, "latest_match", return_value=LatestMatchResult(True, "shared-new-match")), \
+                    patch.object(preview.FaceitClient, "matches_since", return_value=MatchHistoryResult(True, (("shared-new-match", 1.0),))), \
                     contextlib.redirect_stdout(output):
                 preview.main()
             result = json.loads(output.getvalue())

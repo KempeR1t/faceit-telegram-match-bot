@@ -16,6 +16,7 @@ from bot import (
     FaceitRating,
     FlareSolverrClient,
     LatestMatchResult,
+    MatchHistoryResult,
     TelegramClient,
     build_message,
     decode_flaresolverr_json,
@@ -39,6 +40,10 @@ class FakeFaceit:
 
     def latest_match(self, player_id: str, game_id: str) -> LatestMatchResult:
         return LatestMatchResult(ok=True, match_id=self.match_id)
+
+    def matches_since(self, player_id, game_id, previous_match_id):
+        latest = self.latest_match(player_id, game_id)
+        return MatchHistoryResult(latest.ok, ((latest.match_id, 1.0),) if latest.match_id and latest.match_id != previous_match_id else ())
 
     def match_details(self, match_id: str) -> dict:
         return {"started_at": 1_700_000_000, "finished_at": 1_700_001_000}

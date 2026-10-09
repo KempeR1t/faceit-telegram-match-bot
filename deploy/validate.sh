@@ -3,7 +3,7 @@ set -Eeuo pipefail
 APP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$APP_DIR"
 for script in deploy/*.sh; do bash -n "$script"; done
-.venv/bin/python -m py_compile bot.py deploy/preview.py deploy/set-telegram-token.py
+.venv/bin/python -m py_compile bot.py deploy/preview.py deploy/replay.py deploy/set-telegram-token.py
 .venv/bin/python -m unittest discover -s tests -q
 set -a
 source /home/kemper1t/.config/faceit_bot.env

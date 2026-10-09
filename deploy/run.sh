@@ -26,5 +26,10 @@ if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
     exit 0
 fi
 cd "$APP_DIR"
-"$APP_DIR/.venv/bin/python" "$APP_DIR/bot.py" </dev/null
+if [[ "${1:-}" == --replay-plan ]]; then
+    [[ $# == 2 ]] || { echo 'Usage: run.sh --replay-plan <audit-snapshot.json>' >&2; exit 2; }
+    "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/replay.py" "$2" </dev/null
+else
+    "$APP_DIR/.venv/bin/python" "$APP_DIR/bot.py" "$@" </dev/null
+fi
 date -Is >"$STATE_DIR/last-success"
