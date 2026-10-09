@@ -1,47 +1,8 @@
 # FACEIT Match Bot
 
-Python-бот для отслеживания завершённых матчей FACEIT. Бот получает основную
-статистику через FACEIT Data API, дополняет её Rating и Swing через локальный
-FlareSolverr и отправляет сводку в Telegram.
-
-Один запуск `bot.py` выполняет одну проверку и завершается. Для регулярной
-работы проект можно запускать через cron, например раз в 15 минут.
-
-## Порядок установки
-
-Для новой VPS следуйте разделам: требования → подготовка Ubuntu → FlareSolverr
-(если нужен) → установка бота → получение ключей и ID → настройка →
-проверки → ручной запуск → cron. SSH-прокси нужен только при недоступности Telegram.
-
-- [Как работает бот](#как-работает-бот)
-- [Подготовка Ubuntu](#подготовка-ubuntu-2404)
-- [FlareSolverr](#flaresolverr-для-rating-и-swing)
-- [Установка бота](#установка-бота)
-- [FACEIT API key](#получение-faceit-api-key)
-- [Telegram-бот и chat ID](#создание-telegram-бота)
-- [FACEIT player ID](#получение-faceit-player-id)
-- [Настройка](#настройка)
-- [SSH-прокси для Telegram](#опциональный-ssh-прокси-для-telegram)
-- [Cron](#запуск-через-cron-на-ubuntu-2404)
-- [Файл состояния](#файл-состояния)
-- [Обновление](#обновление)
-- [Перенос на другую VPS](#перенос-на-другую-vps)
-- [Диагностика](#диагностика)
-
-## Возможности
-
-- отслеживание нескольких FACEIT-игроков;
-- одно уведомление для игроков, участвовавших в одном матче;
-- карта, счёт, длительность, результат, Rating, Swing, K/D, ADR и MVP;
-- сортировка игроков по убыванию Rating, а при его отсутствии — по K/D;
-- защита от повторных уведомлений через `last_matches.json`;
-- дополнение отправленного сообщения Rating/Swing в течение двух часов;
-- защита от одновременных запусков cron с одним файлом состояния;
-- повторная попытка на следующем запуске, если Telegram не принял сообщение;
-- необязательный HTTP/SOCKS5-прокси только для запросов Telegram;
-- секреты через переменные окружения, список игроков в отдельном JSON-файле;
-- таймауты и повторные GET-запросы при временных ошибках FACEIT API;
-- совместимость с Python 3.10+ и Ubuntu 24.04.
+Бот получает статистику завершённых CS2-матчей через FACEIT Data API,
+дополняет её Rating/Swing через FlareSolverr и отправляет сводки в Telegram.
+Один запуск выполняет один опрос и завершается; регулярные проверки выполняет cron.
 
 ## Как работает бот
 
@@ -194,557 +155,67 @@ Rating/Swing для этого сообщения. У игроков с недо
 Если нет новых матчей и очереди обновлений, FlareSolverr не опрашивается, а в
 журнале остаётся `No new matches found.`.
 
-## Структура проекта
+## Развёртывание через GitHub
 
-```text
-.
-├── bot.py
-├── run_bot.sh
-├── requirements.txt
-├── .env.example
-├── players.example.json
-├── systemd/
-│   └── telegram-proxy.service.example
-├── tools/
-│   ├── resolve_faceit_players.py
-│   └── list_telegram_chats.py
-└── tests/
-    └── test_bot.py
-```
+Для штатных deployment-скриптов используется Linux, пользователь `kemper1t`,
+checkout `/home/kemper1t/faceit_bot`. Нужны Git, Python 3.10+ с `venv`, Bash,
+`flock`, cron и исходящий HTTPS. FlareSolverr нужен для Rating/Swing;
+без него можно установить `FLARESOLVERR_ENABLED=false`.
 
-## Требования
-
-- Ubuntu 24.04 с доступом по SSH и возможностью выполнить `sudo`;
-- Python 3.10 или новее (инструкция устанавливает системный Python Ubuntu);
-- доступ к FACEIT Data API и Telegram Bot API;
-- FACEIT server-side API key и токен Telegram-бота;
-- UUID игроков FACEIT;
-- Docker и FlareSolverr, если нужны Rating и Swing.
-
-Бот запускается от обычного пользователя через cron. Команды ниже рассчитаны
-на Bash и каталог `~/faceit_bot`. При другом пути замените его в командах и cron.
-Все команды выполняются на VPS с ботом, если явно не указано другое.
-
-Основная статистика работает без FlareSolverr: в этом случае установите
-`FLARESOLVERR_ENABLED=false` и пропустите установку Docker и контейнера.
-Если VPS не имеет доступа к Telegram, используйте
-[опциональный SSH-прокси](#опциональный-ssh-прокси-для-telegram).
-
-## Подготовка Ubuntu 24.04
-
-Сначала установить системные пакеты. `python3-venv` обязателен для создания
-виртуального окружения `faceit_env`, а `python3-pip` устанавливает необходимые
-компоненты pip:
+Создайте отдельный ED25519 deploy key на VPS и добавьте публичный ключ в Settings →
+Deploy keys этого репозитория с доступом только на чтение. Закрытый ключ сохраняйте
+на VPS с mode `600`; проверьте официальный SSH host fingerprint GitHub.
 
 ```bash
-sudo apt update
-sudo apt install -y \
-  git curl cron nano openssh-client \
-  python3 python3-venv python3-pip
-
-sudo systemctl enable --now cron
-python3 --version
-```
-
-Повторный запуск `apt install` безопасен: уже установленные пакеты будут
-пропущены. Отдельный системный пользователь для FlareSolverr или бота не
-нужен.
-
-## FlareSolverr для Rating и Swing
-
-Для Rating и Swing бот обращается к scoreboard-summary сайта FACEIT через
-FlareSolverr. Эти поля не извлекаются из основной статистики FACEIT Data API.
-Проект использует контейнер с браузером; успешное прохождение Cloudflare зависит
-от ответа сайта и не гарантируется. [Документация FlareSolverr](https://github.com/FlareSolverr/FlareSolverr).
-
-### Запуск FlareSolverr
-
-Установить Docker и включить его службу:
-
-```bash
-sudo apt install -y docker.io
-sudo systemctl enable --now docker
-sudo docker version
-```
-
-Контейнер публикует API только на `127.0.0.1`, поэтому порт 8191 недоступен из
-интернета:
-
-```bash
-sudo docker run -d \
-  --name=flaresolverr \
-  -p 127.0.0.1:8191:8191 \
-  -e LOG_LEVEL=info \
-  --restart unless-stopped \
-  ghcr.io/flaresolverr/flaresolverr:v3.5.0
-```
-
-Параметр `--restart unless-stopped` автоматически поднимет контейнер после
-перезагрузки VPS. Если контейнер с таким именем уже создан, повторять
-`docker run` не нужно — достаточно запустить его:
-
-```bash
-sudo docker update --restart unless-stopped flaresolverr
-sudo docker start flaresolverr
-```
-
-Первая команда включает автозапуск для уже существующего контейнера без его
-пересоздания.
-
-Проверка API, состояния и последних логов:
-
-```bash
-curl -fsS http://127.0.0.1:8191/ | python3 -m json.tool
-sudo docker ps --filter name=flaresolverr
-sudo docker logs --tail 100 flaresolverr
-```
-
-В ответе первой команды должно быть сообщение `FlareSolverr is ready!`.
-Перезапустить сервис вручную можно командой
-`sudo docker restart flaresolverr`.
-
-## Установка бота
-
-Команды выполняются от того обычного пользователя, в чьём `crontab` затем
-будет запускаться бот:
-
-```bash
-cd ~
-git clone https://github.com/KempeR1t/faceit-telegram-match-bot.git faceit_bot
-cd faceit_bot
-
-python3 -m venv faceit_env
-faceit_env/bin/python3 -m pip install --upgrade pip
-faceit_env/bin/python3 -m pip install -r requirements.txt
-
-faceit_env/bin/python3 --version
-faceit_env/bin/python3 -m pip --version
-```
-
-## Получение FACEIT API key
-
-1. Войти в [FACEIT Developer Portal](https://developers.faceit.com/).
-2. Создать приложение в разделе **App Studio**.
-3. Открыть приложение и перейти в раздел **API Keys**.
-4. Создать ключ типа **Server side**.
-
-Для чтения публичных данных через Data API OAuth client secret не требуется.
-
-Документация FACEIT:
-
-- [Start here](https://docs.faceit.com/getting-started/intro/start-here/)
-- [API Keys](https://docs.faceit.com/getting-started/authentication/api-keys/)
-- [Data API](https://docs.faceit.com/docs/data-api/)
-
-## Создание Telegram-бота
-
-1. Открыть [@BotFather](https://t.me/BotFather).
-2. Выполнить команду `/newbot`.
-3. Задать имя и username бота.
-4. Сохранить полученный токен в `TELEGRAM_BOT_TOKEN`.
-
-Для личного чата необходимо открыть созданного бота и отправить ему `/start`.
-Для группы — добавить бота в группу и отправить команду, например `/start`.
-Для канала — добавить бота администратором с правом публикации и создать
-новую публикацию.
-
-Из каталога `~/faceit_bot` получить chat ID вспомогательным скриптом:
-
-Если доступ к Telegram возможен только через прокси, сначала настройте
-[SSH-туннель](#опциональный-ssh-прокси-для-telegram) и выполните
-`export TELEGRAM_PROXY_URL=socks5h://127.0.0.1:1080` в текущем терминале.
-
-```bash
+GIT_SSH_COMMAND="ssh -i $HOME/.ssh/faceit_bot_deploy -o IdentitiesOnly=yes" \
+  git clone --branch main git@github.com:KempeR1t/faceit-telegram-match-bot.git ~/faceit_bot
 cd ~/faceit_bot
-read -rsp "Telegram bot token: " TELEGRAM_BOT_TOKEN; echo
-export TELEGRAM_BOT_TOKEN
-faceit_env/bin/python3 tools/list_telegram_chats.py
-unset TELEGRAM_BOT_TOKEN
+git config core.sshCommand "ssh -i $HOME/.ssh/faceit_bot_deploy -o IdentitiesOnly=yes"
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+install -d -m 700 ~/.config ~/.local/state/faceit_bot
+touch ~/.config/faceit_bot.env
+chmod 600 ~/.config/faceit_bot.env
 ```
 
-Значение `id=...` из вывода используется как `TELEGRAM_CHAT_ID`. У групп и
-каналов ID обычно отрицательный.
+Заполните `~/.config/faceit_bot.env` по `.env.example`:
 
-Скрипт читает недавние обновления Telegram. Для бота с настроенным webhook
-`getUpdates` недоступен; используйте отдельного бота для проекта. Другие
-приложения, читающие его обновления, могут забрать нужное событие раньше
-вспомогательного скрипта.
+- `FACEIT_API_KEY` — server-side ключ из FACEIT Developer Portal;
+- `TELEGRAM_BOT_TOKEN` — токен BotFather, можно сначала оставить пустым;
+- `TELEGRAM_CHAT_ID` — целевой чат; бот должен иметь право отправлять в него;
+- `FACEIT_PLAYERS_FILE=/home/kemper1t/faceit_bot/data/players.json`;
+- `STATE_FILE=/home/kemper1t/faceit_bot/data/last_matches.json`;
+- `APP_TIMEZONE=Europe/Moscow`, `FACEIT_GAME=cs2`;
+- `TELEGRAM_PROXY_URL=` для прямого подключения;
+- `FLARESOLVERR_ENABLED=true`, `FLARESOLVERR_URL=http://127.0.0.1:8191/v1`.
 
-Документация Telegram:
-
-- [создание бота](https://core.telegram.org/bots/tutorial)
-- [`getUpdates`](https://core.telegram.org/bots/api#getupdates)
-
-## Получение FACEIT player ID
-
-FACEIT player ID — UUID игрока, например
-`00000000-0000-0000-0000-000000000000`. Steam ID и URL профиля вместо него не
-подойдут.
-
-Из каталога `~/faceit_bot` получить ID по никнеймам (заменить `Nickname1` и
-`Nickname2` своими значениями):
+Создайте `data/` с mode `700`, список игроков и исходный файл состояния с mode
+`600`. Данные и env исключены из Git. Секреты не вводите в команды с литералами,
+не публикуйте в Git и не отправляйте в чат.
 
 ```bash
-cd ~/faceit_bot
-read -rsp "FACEIT API key: " FACEIT_API_KEY; echo
-export FACEIT_API_KEY
-faceit_env/bin/python3 tools/resolve_faceit_players.py \
-  Nickname1 Nickname2 \
-  --output players.json
-unset FACEIT_API_KEY
+./deploy/validate.sh
+./deploy/install-cron.sh
 ```
 
-Скрипт найдёт ID и создаст готовый `players.json`. Если файл уже существует,
-его можно отредактировать вручную или явно заменить с помощью `--force`.
+Устанавливается один managed cron block: `*/10 * * * *`, owner `kemper1t`.
+Runner и updater используют общий эксклюзивный `flock`; повторный опрос пропускается,
+обновление при активном опросе отказывается менять код. При пустом Telegram-токене
+cron пропускает выполнение, сохраняя baseline и success marker.
 
-## Настройка
+## Ввод Telegram-токена
 
-При первичной установке создать локальные файлы (существующие не заменяются):
+Подключитесь к VPS и выполните:
 
 ```bash
-cd ~/faceit_bot
-[ -e .env ] || cp .env.example .env
-[ -e players.json ] || cp players.example.json players.json
-chmod 600 .env
-chmod 600 players.json
-nano .env
-nano players.json
+~/faceit_bot/.venv/bin/python ~/faceit_bot/deploy/set-telegram-token.py
 ```
 
-Заполнить ключи и chat ID из предыдущих разделов. Если `players.json` создан
-вспомогательным скриптом, сохранить его содержимое. UUID в шаблоне нужно заменить
-реальными идентификаторами.
-
-Пример `.env`:
-
-```dotenv
-FACEIT_API_KEY=faceit_api_key
-TELEGRAM_BOT_TOKEN=telegram_bot_token
-TELEGRAM_CHAT_ID=-1001234567890
-TELEGRAM_PROXY_URL=
-FACEIT_PLAYERS_FILE=players.json
-
-FACEIT_GAME=cs2
-APP_TIMEZONE=Europe/Moscow
-STATE_FILE=last_matches.json
-REQUEST_TIMEOUT_SECONDS=15
-FLARESOLVERR_ENABLED=true
-FLARESOLVERR_URL=http://127.0.0.1:8191/v1
-FLARESOLVERR_MAX_TIMEOUT_MS=120000
-NOTIFY_ON_FIRST_RUN=false
-LOG_LEVEL=INFO
-```
-
-Файл `.env` исключён из Git. Значения из него загружаются в окружение процесса
-скриптом `run_bot.sh`. Сам `bot.py` файл `.env` не читает: при прямом запуске
-переменные должны быть экспортированы заранее. Файл `.env` имеет синтаксис shell;
-значения с пробелами и спецсимволами заключайте в одинарные кавычки.
-Редактируйте только доверенный файл, поскольку оболочка выполняет его содержимое.
-Не публикуйте `.env`, `players.json` и файл состояния.
-
-Игроки настраиваются отдельно в `players.json`:
-
-```json
-{
-  "11111111-1111-4111-8111-111111111111": "Nickname1",
-  "22222222-2222-4222-8222-222222222222": "Nickname2"
-}
-```
-
-`players.json` также исключён из Git. В репозитории находится только безопасный
-шаблон `players.example.json`.
-
-### Переменные окружения
-
-| Переменная | Обязательна | Назначение |
-|---|---:|---|
-| `FACEIT_API_KEY` | да | server-side API key FACEIT |
-| `TELEGRAM_BOT_TOKEN` | да | токен Telegram-бота |
-| `TELEGRAM_CHAT_ID` | да | ID личного чата, группы или канала |
-| `TELEGRAM_PROXY_URL` | нет | HTTP/SOCKS5-прокси только для Telegram; пустое значение означает прямое подключение |
-| `FACEIT_PLAYERS_FILE` | нет | путь к списку игроков, по умолчанию `players.json` |
-| `FACEIT_GAME` | нет | идентификатор игры, по умолчанию `cs2` |
-| `APP_TIMEZONE` | нет | часовой пояс, по умолчанию `Europe/Moscow` |
-| `STATE_FILE` | нет | файл состояния, по умолчанию `last_matches.json` |
-| `REQUEST_TIMEOUT_SECONDS` | нет | таймаут FACEIT Data API и Telegram, по умолчанию 15 секунд; FlareSolverr использует отдельный лимит |
-| `FLARESOLVERR_ENABLED` | нет | добавлять Rating и Swing через FlareSolverr, по умолчанию `true` |
-| `FLARESOLVERR_URL` | нет | адрес API FlareSolverr, по умолчанию `http://127.0.0.1:8191/v1` |
-| `FLARESOLVERR_MAX_TIMEOUT_MS` | нет | ожидание решения Cloudflare, по умолчанию 120000 мс |
-| `NOTIFY_ON_FIRST_RUN` | нет | отправлять ли последний матч при первом наблюдении игрока, по умолчанию `false` |
-| `LOG_LEVEL` | нет | `DEBUG`, `INFO`, `WARNING`, `ERROR` или `CRITICAL`; по умолчанию `INFO` |
-
-Относительные пути `FACEIT_PLAYERS_FILE` и `STATE_FILE` считаются от каталога
-`bot.py`. Порядок ключей в `players.json` используется при равенстве показателей
-и для определения общего результата матча. Бот проверяет корректность JSON,
-UUID, пустые никнеймы и повторяющиеся ID. При нестандартных именах файлов
-настройте их исключение из Git самостоятельно.
-
-## Проверка конфигурации
-
-```bash
-cd ~/faceit_bot
-set -a
-. ./.env
-set +a
-
-faceit_env/bin/python3 bot.py --check-config
-```
-
-Команда проверяет переменные окружения без сетевых запросов и не выводит
-значения ключей.
-
-## Проверка Telegram
-
-```bash
-cd ~/faceit_bot
-set -a
-. ./.env
-set +a
-
-faceit_env/bin/python3 bot.py --test-telegram
-```
-
-В указанный чат должно прийти тестовое сообщение. Эта команда не меняет файл
-состояния и не создаёт задание на дополнение статистики. При сетевой ошибке
-перейдите к [настройке SSH-прокси](#опциональный-ssh-прокси-для-telegram).
-
-## Опциональный SSH-прокси для Telegram
-
-Этот раздел нужен только тогда, когда VPS с ботом не может подключиться к
-`api.telegram.org`, но имеется другая VPS с рабочим доступом к Telegram. Если
-`TELEGRAM_PROXY_URL` отсутствует или оставлена пустой, бот подключается к
-Telegram напрямую и никаких дополнительных действий не требуется.
-
-Самый простой безопасный вариант — динамический SOCKS5-туннель OpenSSH.
-Локальный SOCKS-порт будет слушать только `127.0.0.1` на VPS с ботом. На VPS
-с доступом к Telegram отдельный прокси-сервер устанавливать не нужно:
-используется уже работающий SSH-сервер.
-
-В командах ниже заменить:
-
-- `SSH_PORT` — порт SSH на VPS с доступом к Telegram;
-- `PROXY_USER` — существующий пользователь этой VPS;
-- `PROXY_VPS_IP` — её IP-адрес.
-
-Все команды, кроме явно оговорённых, выполняются на VPS с ботом.
-
-### Создание ключа и проверка SSH
-
-```bash
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-ssh-keygen -t ed25519 -f ~/.ssh/telegram_proxy -C telegram-proxy -N ''
-
-ssh-copy-id \
-  -p SSH_PORT \
-  -i ~/.ssh/telegram_proxy.pub \
-  PROXY_USER@PROXY_VPS_IP
-
-ssh \
-  -p SSH_PORT \
-  -i ~/.ssh/telegram_proxy \
-  PROXY_USER@PROXY_VPS_IP \
-  true
-```
-
-При первом подключении сверьте отпечаток SSH-ключа сервера с данными его
-администратора и подтвердите подключение. Последняя команда должна завершиться
-без ошибки и запроса пароля; постоянная служба использует `BatchMode=yes`.
-На удалённом SSH-сервере должна быть разрешена переадресация TCP. Если вход по паролю на
-удалённой VPS отключён, содержимое `~/.ssh/telegram_proxy.pub` нужно добавить
-в `~/.ssh/authorized_keys` существующего удалённого пользователя вручную.
-Приватный файл `~/.ssh/telegram_proxy` копировать нельзя.
-
-### Ручная проверка туннеля
-
-В первом терминале VPS с ботом запустить:
-
-```bash
-ssh -NT \
-  -p SSH_PORT \
-  -D 127.0.0.1:1080 \
-  -i ~/.ssh/telegram_proxy \
-  -o IdentitiesOnly=yes \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  PROXY_USER@PROXY_VPS_IP
-```
-
-SSH работает на переднем плане и обычно не печатает сообщений. Подтвердите
-работоспособность запросом во втором терминале:
-
-```bash
-curl \
-  --proxy socks5h://127.0.0.1:1080 \
-  --connect-timeout 10 \
-  --max-time 20 \
-  -o /dev/null \
-  -w 'Telegram HTTP %{http_code}\n' \
-  https://api.telegram.org
-```
-
-HTTP-ответ (часто `302`) подтверждает, что HTTPS-запрос через прокси дошёл до
-сервера. Отправку от имени бота проверяет команда `--test-telegram`. После
-проверки временный туннель обязательно остановить через `Ctrl+C`, иначе он
-займёт порт 1080 и помешает запуску постоянной службы.
-
-### Автозапуск SSH-туннеля
-
-Создать пользовательскую службу:
-
-```bash
-cd ~/faceit_bot
-mkdir -p ~/.config/systemd/user
-cp systemd/telegram-proxy.service.example \
-  ~/.config/systemd/user/telegram-proxy.service
-nano ~/.config/systemd/user/telegram-proxy.service
-```
-
-Содержимое файла, в котором также нужно заменить три значения-заполнителя:
-
-```ini
-[Unit]
-Description=SSH SOCKS proxy for Telegram
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/ssh -NT -p SSH_PORT -D 127.0.0.1:1080 -i %h/.ssh/telegram_proxy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 PROXY_USER@PROXY_VPS_IP
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-```
-
-Включить запуск пользовательских служб после загрузки VPS и запустить
-туннель:
-
-```bash
-sudo loginctl enable-linger "$USER"
-systemctl --user daemon-reload
-systemctl --user enable --now telegram-proxy.service
-```
-
-Проверка:
-
-```bash
-systemctl --user status telegram-proxy.service --no-pager
-ss -lntp | grep ':1080'
-```
-
-Ожидается статус `active (running)`, а порт должен слушать только на
-`127.0.0.1:1080`.
-
-### Подключение бота к прокси
-
-Добавить в локальный `~/faceit_bot/.env`:
-
-```dotenv
-TELEGRAM_PROXY_URL=socks5h://127.0.0.1:1080
-```
-
-После заполнения `.env` и `players.json` проверить конфигурацию и отправку.
-Если туннель настраивается до получения chat ID, сначала вернитесь к разделам
-получения ID и настройки:
-
-```bash
-cd ~/faceit_bot
-set -a
-. ./.env
-set +a
-
-faceit_env/bin/python3 bot.py --check-config
-faceit_env/bin/python3 bot.py --test-telegram
-```
-
-В проверке конфигурации должно появиться `telegram_proxy=enabled`, а в Telegram
-должно прийти тестовое сообщение. `run_bot.sh` и cron автоматически загружают
-переменную из `.env`.
-
-Поддерживаются адреса с протоколами `http://`, `https://`, `socks5://` и
-`socks5h://`. Для SSH-туннеля рекомендуется `socks5h://`, чтобы имя
-`api.telegram.org` разрешалось на VPS с рабочим доступом.
-
-Настройка применяется только к Telegram. FACEIT Data API и локальный
-FlareSolverr продолжают работать напрямую. Конфликта с FlareSolverr нет:
-обычно он слушает `127.0.0.1:8191`, а SOCKS-туннель — `127.0.0.1:1080` на VPS
-с ботом. На удалённой VPS используется только её существующий SSH-порт.
-
-Диагностика туннеля:
-
-```bash
-journalctl --user -u telegram-proxy.service -n 100 --no-pager
-```
-
-Если служба завершается с кодом `255`, точная причина будет в этой команде.
-Сообщение `Address already in use` означает, что порт 1080 всё ещё занят
-ручным SSH-туннелем.
-
-## Ручной запуск
-
-```bash
-cd ~/faceit_bot
-chmod 755 run_bot.sh
-./run_bot.sh
-```
-
-При `NOTIFY_ON_FIRST_RUN=false` первое наблюдаемое состояние каждого нового
-игрока сохраняется без отправки старого матча. Следующие завершённые матчи уже
-создают уведомления.
-
-## Запуск через cron на Ubuntu 24.04
-
-`cron` уже установлен и включён на этапе подготовки Ubuntu. Проверить сервис:
-
-```bash
-systemctl is-active cron
-```
-
-Подготовить скрипт запуска и файл лога:
-
-```bash
-cd ~/faceit_bot
-chmod 755 run_bot.sh
-touch bot.log
-chmod 600 bot.log
-```
-
-Открыть пользовательский crontab:
-
-```bash
-crontab -e
-```
-
-Добавить строку:
-
-```cron
-*/15 * * * * "$HOME/faceit_bot/run_bot.sh" >> "$HOME/faceit_bot/bot.log" 2>&1
-```
-
-Задание запускается от владельца этого `crontab`; отдельный пользователь не
-нужен. Cron автоматически задаёт `$HOME` для этого пользователя. Скрипт
-`run_bot.sh` определяет свой каталог, загружает лежащий рядом `.env` и запускает
-Python из `faceit_env` по абсолютному пути. Текущий каталог cron не имеет значения.
-Это же расписание обслуживает очередь дополнения сообщений. Бот не является
-постоянно работающей службой.
-
-Проверить сохранённое задание:
-
-```bash
-crontab -l
-```
-
-Не дожидаясь следующей четверти часа, можно выполнить ту же команду вручную и
-проверить лог:
-
-```bash
-cd ~/faceit_bot
-./run_bot.sh >> bot.log 2>&1
-tail -n 100 bot.log
-```
+Скрипт запрашивает токен скрытым вводом, проверяет `getMe` и доступность настроенного
+чата через `getChat`, затем атомарно сохраняет значение в
+`~/.config/faceit_bot.env` с mode `600`. Сообщений для проверки не отправляет.
+Следующий cron запуск обработает новые матчи относительно сохранённого baseline.
+Для запуска сразу после ввода токена: `~/faceit_bot/deploy/run.sh`.
 
 ## Файл состояния
 
@@ -768,115 +239,34 @@ tail -n 100 bot.log
 обновлённых с версий до 1.4.0, ранее отправленные сообщения автоматически
 не дополняются: те версии не сохраняли Telegram message ID.
 
-## Обновление
+## Обновление и диагностика
 
-1. Открыть `crontab -e` и временно закомментировать строку запуска бота.
-   Дождаться завершения уже запущенного процесса.
-2. Сохранить конфигурацию и состояние в отдельном каталоге:
+GitHub `main` — источник кода. Файлы Python на VPS вручную не редактируйте.
 
 ```bash
-cd ~/faceit_bot
-bot_backup_dir=$(mktemp -d "$HOME/faceit-bot-backup.XXXXXX")
-chmod 700 "$bot_backup_dir"
-cp -p .env players.json "$bot_backup_dir/"
-if [ -f last_matches.json ]; then
-  cp -p last_matches.json "$bot_backup_dir/"
-fi
+cd ~/faceit_bot && ./deploy/update.sh
 ```
 
-При нестандартных `FACEIT_PLAYERS_FILE` и `STATE_FILE` скопируйте файлы по
-настроенным путям вместо стандартных.
+Updater проверяет чистоту checkout и ветку, применяет только fast-forward,
+синхронизирует `.venv`, выполняет pip check, syntax checks и тесты. Запуск бота
+и cron не меняет. Зависимости установки автоматически не откатываются при ошибке.
 
-3. Обновить код и зависимости:
+Read-only preview до первого запуска (не обращается к Telegram, не меняет state):
 
 ```bash
-cd ~/faceit_bot
-git status --short
-git pull --ff-only
-faceit_env/bin/python3 -m pip install -r requirements.txt
-faceit_env/bin/python3 bot.py --version
-
 set -a
-. ./.env
+source ~/.config/faceit_bot.env
 set +a
-faceit_env/bin/python3 bot.py --check-config
-./run_bot.sh
+~/faceit_bot/.venv/bin/python ~/faceit_bot/deploy/preview.py
 ```
 
-Если `git pull --ff-only` сообщает о конфликте или расхождении веток, остановитесь
-и разберите локальные изменения перед продолжением. Не заменяйте рабочие `.env`,
-`players.json` и `last_matches.json` файлами-шаблонами. Сравните
-`.env.example` с конфигурацией и добавьте нужные новые параметры вручную.
+Логи — `~/.local/state/faceit_bot/logs/cron.log` с ограниченной ротацией;
+health marker успешного опроса — `~/.local/state/faceit_bot/last-success`.
+Пропуск из-за пустого токена или активной блокировки marker не обновляет.
+Резервные копии crontab — `~/backups/faceit-bot-crontabs/`.
 
-4. Проверить лог и вернуть строку cron в активное состояние.
-
-Перезапуск отдельной службы бота не нужен: следующий cron запустит обновлённый
-код. Уже отправленные сообщения из очереди сохраняются. Во время паузы
-двухчасовой срок продолжает идти. Контейнер FlareSolverr и SSH-туннель обновляются
-отдельно от Python-проекта.
-
-Сообщения предыдущих версий, ещё находящиеся в очереди дополнения,
-при следующем редактировании используют широкую таблицу с сохранением ID сообщения.
-Сообщения вне очереди не изменяются. Устаревшие поля выбора формата
-(`__next_message_layout__` и `layout` в записях очереди) игнорируются при чтении
-и удаляются при следующем сохранении состояния. История матчей, ID сообщений
-и сроки дополнения сохраняются. Новые переменные окружения и ручное изменение
-`players.json` или файла состояния не требуются.
-
-## Перенос на другую VPS
-
-1. Подготовить новую VPS по разделам установки, создать виртуальное окружение
-   и при необходимости запустить FlareSolverr и SSH-прокси.
-2. Отключить строку cron на исходной VPS и дождаться завершения текущего запуска.
-3. Через SSH/SCP перенести `.env`, `players.json` и `last_matches.json`
-   в каталог проекта на новой VPS. При пользовательских путях использовать
-   значения `FACEIT_PLAYERS_FILE` и `STATE_FILE`.
-4. Установить права `600` на перенесённые файлы, проверить пути, доступ к API
-   и параметры прокси. Виртуальное окружение и файл `.lock` переносить не нужно.
-5. Выполнить проверку конфигурации, `--test-telegram` и ручной запуск, затем
-   включить cron только на новой VPS.
-
-Для продолжения редактирования сообщений нужен тот же Telegram-бот.
-Чат каждого ожидающего сообщения хранится в состоянии; изменение
-`TELEGRAM_CHAT_ID` влияет на новые отправки, но не переносит старые сообщения
-в другой чат. Не запускайте обе VPS одновременно с копиями одного состояния:
-локальная блокировка не синхронизирует разные серверы.
-
-## Тесты
+Проверки разработки из checkout с установленными зависимостями:
 
 ```bash
-cd ~/faceit_bot
-faceit_env/bin/python3 -m unittest discover -s tests -v
-faceit_env/bin/python3 -m compileall -q bot.py tools tests
-sh -n run_bot.sh
+python -m unittest discover -s tests -q
 ```
-
-## Диагностика
-
-- `HTTP 401` от FACEIT — неверный или отозванный API key.
-- `HTTP 403` от FACEIT — ключ отключён либо запрос запрещён настройками
-  приложения.
-- `HTTP 429` — превышен лимит API; бот повторит GET-запрос с задержкой.
-- `FlareSolverr failed ... Timeout` — Cloudflare не удалось пройти за заданное
-  время; сообщение будет отправлено с пометкой ожидания, повторная проверка
-  произойдёт на следующем запуске в пределах двухчасового окна.
-- FlareSolverr не используется — проверить `FLARESOLVERR_ENABLED`, адрес
-  `FLARESOLVERR_URL` и состояние контейнера командами
-  `sudo docker ps --filter name=flaresolverr` и
-  `sudo docker logs --tail 100 flaresolverr`.
-- Telegram не отправляет сообщения — проверить токен, chat ID и наличие бота в
-  целевом чате.
-- Telegram недоступен напрямую — проверить `TELEGRAM_PROXY_URL`, статус
-  `telegram-proxy.service` и доступ через `curl --proxy` по инструкции выше.
-- `No chats found` — отправить боту новое сообщение или команду и повторить
-  `tools/list_telegram_chats.py`.
-- `Telegram rejected editMessageText` — ошибка редактирования; проверить доступ
-  к чату и наличие исходного сообщения. Задание сохраняется для следующего запуска.
-- `Another bot run is active` — предыдущая проверка ещё выполняется; текущая
-  пропущена, чтобы процессы не работали с одним состоянием одновременно.
-- `No new matches found.` при первом запуске — проверить
-  `NOTIFY_ON_FIRST_RUN`: по умолчанию последний матч только запоминается.
-- Нет Rating после двух часов — автоматическое ожидание завершено. Основная
-  статистика и уже полученные показатели остаются в сообщении.
-- Ошибка чтения `last_matches.json` — проверить JSON или восстановить файл из
-  резервной копии; повреждённый файл не перезаписывается автоматически.

@@ -351,6 +351,8 @@ def build_http_session() -> requests.Session:
     )
     adapter = HTTPAdapter(max_retries=retry)
     session = requests.Session()
+    # Telegram uses only the explicitly configured proxy, or a direct connection.
+    session.trust_env = False
     session.mount("https://", adapter)
     session.headers.update({"User-Agent": f"faceit-telegram-match-bot/{VERSION}"})
     return session
