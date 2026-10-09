@@ -577,6 +577,7 @@ class FlareSolverrClient:
         endpoint: str,
         max_timeout_ms: int,
         cleanup_stale_sessions: bool = False,
+        cache_file: Path | None = None,
     ) -> None:
         self._session = session
         self._endpoint = endpoint
@@ -586,6 +587,47 @@ class FlareSolverrClient:
         self._session_inventory_checked = False
         self._session_creation_attempted = False
         self._session_id: str | None = None
+        self._cache_file = cache_file
+        self._rating_cache = self._load_rating_cache()
+
+    def _load_rating_cache(self) -> dict[str, dict[str, FaceitRating]]:
+        if self._cache_file is None or not self._cache_file.exists():
+            return {}
+        try:
+            payload = json.loads(self._cache_file.read_text())
+            cache = {}
+            if not isinstance(payload, dict):
+                raise ValueError('Invalid rating cache')
+            for key, values in payload.items():
+                if not isinstance(key, str) or not isinstance(values, dict):
+                    raise ValueError('Invalid rating cache')
+                parsed = {}
+                for pid, item in values.items():
+                    if not isinstance(pid, str) or not isinstance(item, dict):
+                        raise ValueError('Invalid cached player')
+                    rating, swing = finite_float(item.get('rating')), finite_float(item.get('swing'))
+                    if rating is None or swing is None:
+                        raise ValueError('Invalid cached rating')
+                    parsed[pid] = FaceitRating(rating, swing)
+                cache[key] = parsed
+            return cache
+        except (OSError, ValueError, TypeError):
+            LOGGER.warning('Rating cache could not be read; fetching fresh data.')
+            return {}
+
+    def _remember_ratings(self, key: str, values: dict[str, FaceitRating]) -> dict[str, FaceitRating]:
+        combined = dict(self._rating_cache.get(key, {}))
+        combined.update(values)
+        self._rating_cache[key] = combined
+        if self._cache_file is not None and values:
+            payload = {k: {pid: {'rating': r.rating, 'swing': r.swing} for pid, r in v.items()}
+                       for k, v in self._rating_cache.items()}
+            try:
+                save_state(self._cache_file, payload)
+                self._cache_file.chmod(0o600)
+            except (StateError, OSError):
+                LOGGER.warning('Could not persist Rating cache; current values retained in memory.')
+        return combined
 
     def _api_call(
         self,
@@ -769,7 +811,9 @@ class FlareSolverrClient:
                 ),
             )
             if solution is not None:
-                return solution
+                if decode_flaresolverr_json(solution.get("response")) is not None:
+                    return solution
+                LOGGER.warning("FACEIT scoreboard response is not valid JSON; lookup unsuccessful.")
             if request_attempt < self.SCOREBOARD_REQUEST_ATTEMPTS:
                 LOGGER.warning(
                     "FACEIT scoreboard lookup failed; retrying in %.0f seconds "
@@ -788,14 +832,18 @@ class FlareSolverrClient:
             f"{quote(match_id, safe='-')}/match-rounds/1/scoreboard-summary"
         )
         solution = self._get_scoreboard_solution(scoreboard_url)
+        cache_key = game_id + '/' + match_id
         if solution is None:
             self._destroy_session()
-            return {}
+            cached = dict(self._rating_cache.get(cache_key, {}))
+            if cached:
+                LOGGER.info('Using saved FACEIT Rating/Swing for %s player(s).', len(cached))
+            return cached
         payload = decode_flaresolverr_json(solution.get("response"))
         if payload is None:
             LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
             return {}
-        ratings = extract_faceit_ratings(payload, game_id)
+        ratings = self._remember_ratings(cache_key, extract_faceit_ratings(payload, game_id))
         LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s).", len(ratings))
         return ratings
 
@@ -1491,6 +1539,7 @@ def main(argv: list[str] | None = None) -> int:
                 config.flaresolverr_url,
                 config.flaresolverr_max_timeout_ms,
                 cleanup_stale_sessions=True,
+                cache_file=config.state_file.with_name('faceit_ratings.json'),
             )
         return run_once(config, faceit, telegram, flaresolverr)
     except StateError as exc:

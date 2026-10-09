@@ -60,7 +60,8 @@ def main():
                                   config.request_timeout, config.telegram_proxy_url)
         if config.flaresolverr_enabled:
             provider = FlareSolverrClient(session, config.flaresolverr_url,
-                                         config.flaresolverr_max_timeout_ms, cleanup_stale_sessions=True)
+                                         config.flaresolverr_max_timeout_ms, cleanup_stale_sessions=True,
+                                         cache_file=config.state_file.with_name('faceit_ratings.json'))
         return run_once(config, replay, telegram, provider)
 
 
