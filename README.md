@@ -281,7 +281,7 @@ set +a
 Логи — `~/.local/state/faceit_bot/logs/cron.log` с ограниченной ротацией;
 health marker успешного опроса — `~/.local/state/faceit_bot/last-success`.
 Пропуск из-за пустого токена или активной блокировки marker не обновляет.
-Резервные копии crontab — `~/backups/faceit-bot-crontabs/`.
+Резервные копии crontab — `~/.config/deployment-backups/faceit-bot-crontabs/`.
 
 Проверки разработки из checkout с установленными зависимостями:
 

@@ -3,7 +3,7 @@ set -Eeuo pipefail
 [[ "$(id -un)" == kemper1t ]] || { echo 'Run as kemper1t.' >&2; exit 1; }
 umask 077
 STATE_DIR=/home/kemper1t/.local/state/faceit_bot
-BACKUP_DIR=/home/kemper1t/backups/faceit-bot-crontabs
+BACKUP_DIR=/home/kemper1t/.config/deployment-backups/faceit-bot-crontabs
 mkdir -p "$STATE_DIR" "$BACKUP_DIR"
 chmod 700 "$STATE_DIR" "$BACKUP_DIR"
 CURRENT=$(mktemp)
