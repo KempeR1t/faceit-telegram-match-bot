@@ -6,7 +6,7 @@ for script in deploy/*.sh; do bash -n "$script"; done
 .venv/bin/python -m py_compile bot.py deploy/preview.py deploy/replay.py deploy/set-telegram-token.py
 .venv/bin/python -m unittest discover -s tests -q
 set -a
-source /home/kemper1t/.config/faceit_bot.env
+source "$HOME/.config/faceit_bot.env"
 set +a
 # Validate all other settings before the user supplies a Telegram token.
 if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then

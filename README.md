@@ -175,8 +175,9 @@ Rating/Swing для этого сообщения. У игроков с недо
 
 ## Развёртывание через GitHub
 
-Для штатных deployment-скриптов используется Linux, пользователь `kemper1t`,
-checkout `/home/kemper1t/faceit_bot`. Нужны Git, Python 3.10+ с `venv`, Bash,
+Для штатных deployment-скриптов используется Linux и checkout `~/faceit_bot`.
+Запускайте их от владельца checkout: env и state берутся из его `$HOME`,
+а cron использует фактический абсолютный путь checkout. Нужны Git, Python 3.10+ с `venv`, Bash,
 `flock`, cron и исходящий HTTPS. FlareSolverr нужен для Rating/Swing;
 без него можно установить `FLARESOLVERR_ENABLED=false`.
 
@@ -216,7 +217,7 @@ chmod 600 ~/.config/faceit_bot.env
 ./deploy/install-cron.sh
 ```
 
-Устанавливается один managed cron block: `*/10 * * * *`, owner `kemper1t`.
+Устанавливается один managed cron block: `*/10 * * * *`, owner — текущий пользователь.
 Runner и updater используют общий эксклюзивный `flock`; повторный опрос пропускается,
 обновление при активном опросе отказывается менять код. При пустом Telegram-токене
 cron пропускает выполнение, сохраняя baseline и success marker.
@@ -228,6 +229,10 @@ cron пропускает выполнение, сохраняя baseline и suc
 ```bash
 ~/faceit_bot/.venv/bin/python ~/faceit_bot/deploy/set-telegram-token.py
 ```
+
+Проверка токена использует `TELEGRAM_PROXY_URL` из env. Для SSH SOCKS-туннеля
+укажите `socks5h://127.0.0.1:1080`: DNS Telegram разрешается на удалённом VPS.
+Туннель должен работать постоянно, слушать только loopback и проверять SSH host key.
 
 Скрипт запрашивает токен скрытым вводом, проверяет `getMe` и доступность настроенного
 чата через `getChat`, затем атомарно сохраняет значение в

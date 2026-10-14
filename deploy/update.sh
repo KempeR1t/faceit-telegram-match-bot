@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 APP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="/home/kemper1t/.local/state/faceit_bot"
+STATE_DIR="$HOME/.local/state/faceit_bot"
 umask 077
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"

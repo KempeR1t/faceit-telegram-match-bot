@@ -11,7 +11,7 @@ import tempfile
 
 import requests
 
-ENV_FILE = Path("/home/kemper1t/.config/faceit_bot.env")
+ENV_FILE = Path.home() / ".config/faceit_bot.env"
 
 def main():
     mode = ENV_FILE.stat()
@@ -27,12 +27,20 @@ def main():
     chat_parts = shlex.split(chat_settings[0])
     if len(chat_parts) != 1 or not re.fullmatch(r"-?[0-9]+", chat_parts[0]):
         raise SystemExit("Expected a numeric chat ID; file was not changed.")
+    proxy_settings = re.findall(r"(?m)^TELEGRAM_PROXY_URL=(.*)$", text)
+    if len(proxy_settings) > 1:
+        raise SystemExit("Expected at most one proxy setting; file was not changed.")
+    proxy_parts = shlex.split(proxy_settings[0]) if proxy_settings else []
+    if len(proxy_parts) > 1:
+        raise SystemExit("Invalid proxy setting; file was not changed.")
+    proxy_url = proxy_parts[0] if proxy_parts else ""
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else {}
     with requests.Session() as session:
         session.trust_env = False
         for method, params in (("getMe", None), ("getChat", {"chat_id": chat_parts[0]})):
             try:
                 r = session.get("https://api.telegram.org/bot" + token + "/" + method,
-                                params=params, timeout=20)
+                                params=params, timeout=20, proxies=proxies)
                 data = r.json()
             except (requests.RequestException, ValueError):
                 raise SystemExit("Telegram validation failed; file was not changed.") from None

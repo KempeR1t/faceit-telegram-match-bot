@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 APP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="/home/kemper1t/.config/faceit_bot.env"
-STATE_DIR="/home/kemper1t/.local/state/faceit_bot"
+ENV_FILE="$HOME/.config/faceit_bot.env"
+STATE_DIR="$HOME/.local/state/faceit_bot"
 umask 077
 mkdir -p "$STATE_DIR/logs"
 chmod 700 "$STATE_DIR" "$STATE_DIR/logs"
