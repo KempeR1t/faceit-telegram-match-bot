@@ -852,14 +852,30 @@ class PendingMessageTests(unittest.TestCase):
         self.run_at(10000)
         self.provider.requests.clear()
         self.telegram.edit_ok = False
-        self.assertEqual(self.run_at(17200), 1)
+        self.assertEqual(self.run_at(24400), 1)
         self.assertEqual(self.provider.requests, [])
         self.assertIn("недоступны", self.telegram.edits[-1][1])
         self.assertIn("new-match", load_state(self.path)[0][PENDING_MESSAGES_KEY])
         self.telegram.edit_ok = True
-        self.assertEqual(self.run_at(18100), 0)
+        self.assertEqual(self.run_at(25300), 0)
         self.assertEqual(self.provider.requests, [])
         self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_ratings_arriving_after_two_hours_still_update_original_message(self) -> None:
+        self.run_at(10000)
+        self.provider.ratings = {PLAYER_ID: FaceitRating(1.5, 0.03)}
+        self.assertEqual(self.run_at(10000 + 3 * 60 * 60), 0)
+        self.assertEqual(len(self.telegram.messages), 1)
+        self.assertIn("+3.00%", self.telegram.edits[-1][1])
+        self.assertEqual(load_state(self.path)[0][PENDING_MESSAGES_KEY], {})
+
+    def test_waiting_message_is_checked_until_four_hour_deadline(self) -> None:
+        self.run_at(10000)
+        self.provider.requests.clear()
+        self.assertEqual(self.run_at(10000 + 4 * 60 * 60 - 1), 0)
+        self.assertEqual(len(self.provider.requests), 1)
+        self.assertEqual(self.telegram.edits, [])
+        self.assertIn("new-match", load_state(self.path)[0][PENDING_MESSAGES_KEY])
 
     def test_failed_edit_preserves_ratings_for_next_run(self) -> None:
         self.run_at(10000)

@@ -36,7 +36,7 @@ BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
-RATING_UPDATE_WINDOW_SECONDS = 2 * 60 * 60
+RATING_UPDATE_WINDOW_SECONDS = 4 * 60 * 60
 PENDING_MESSAGES_KEY = "__pending_messages__"
 SENT_MATCHES_KEY = "__sent_matches__"
 LOGGER = logging.getLogger("faceit_match_bot")
@@ -811,9 +811,28 @@ class FlareSolverrClient:
                 ),
             )
             if solution is not None:
-                if decode_flaresolverr_json(solution.get("response")) is not None:
+                payload = decode_flaresolverr_json(solution.get("response"))
+                errors = payload.get("errors") if payload is not None else None
+                if errors:
+                    error_items = errors if isinstance(errors, list) else []
+                    codes = sorted({
+                        str(item.get("code")) for item in error_items
+                        if isinstance(item, dict)
+                        and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(item.get("code", "")))
+                    })
+                    LOGGER.warning("FACEIT scoreboard returned API errors: %s.",
+                                   ", ".join(codes) or "unknown")
+                    if any(isinstance(item, dict) and "not available for anonymous users"
+                           in str(item.get("message", "")).lower() for item in error_items):
+                        LOGGER.warning(
+                            "FACEIT requires a signed-in account for this scoreboard; "
+                            "this is an access error, not pending Rating/Swing calculation."
+                        )
+                        return None
+                elif payload is not None and isinstance(payload.get("payload"), dict):
                     return solution
-                LOGGER.warning("FACEIT scoreboard response is not valid JSON; lookup unsuccessful.")
+                else:
+                    LOGGER.warning("FACEIT scoreboard response is not valid statistics JSON; lookup unsuccessful.")
             if request_attempt < self.SCOREBOARD_REQUEST_ATTEMPTS:
                 LOGGER.warning(
                     "FACEIT scoreboard lookup failed; retrying in %.0f seconds "
@@ -826,6 +845,7 @@ class FlareSolverrClient:
     def match_ratings(
         self, match_id: str, game_id: str
     ) -> dict[str, FaceitRating]:
+        LOGGER.info("Looking up FACEIT Rating/Swing for match %s.", match_id)
         scoreboard_url = (
             f"{FACEIT_WEB_BASE}/api/statistics/v1/"
             f"{quote(game_id, safe='-_')}/matches/"
@@ -844,7 +864,7 @@ class FlareSolverrClient:
             LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
             return {}
         ratings = self._remember_ratings(cache_key, extract_faceit_ratings(payload, game_id))
-        LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s).", len(ratings))
+        LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s), match %s.", len(ratings), match_id)
         return ratings
 
     def _destroy_session(self) -> None:
@@ -1481,11 +1501,23 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class TelegramTokenFilter(logging.Filter):
+    """Redact Bot API credentials from third-party retry warnings as well."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = re.sub(r"/bot\d+:[A-Za-z0-9_-]+", "/bot<redacted>", record.getMessage())
+        record.args = ()
+        return True
+
+
 def configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(item, TelegramTokenFilter) for item in handler.filters):
+            handler.addFilter(TelegramTokenFilter())
 
 
 def main(argv: list[str] | None = None) -> int:
