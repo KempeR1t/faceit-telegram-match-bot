@@ -1056,7 +1056,11 @@ class FlareSolverrClientTests(unittest.TestCase):
             commands,
             ["sessions.create", "request.get", "sessions.destroy"],
         )
-        self.assertIn("scoreboard-summary", session.requests[1]["json"]["url"])
+        self.assertEqual(
+            session.requests[1]["json"]["url"],
+            "https://www.faceit.com/api/statistics/v1/cs2/matches/"
+            "1-test-match/scoreboard-summary?statsType=2",
+        )
 
     def test_retries_http_500_in_the_same_session(self) -> None:
         scoreboard = {

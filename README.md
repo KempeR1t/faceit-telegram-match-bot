@@ -42,7 +42,9 @@
 
 ### Ожидание Rating и Swing
 
-Данные берутся из scoreboard-summary сайта FACEIT через FlareSolverr. Наличие
+Данные берутся из сводной статистики всего матча через FlareSolverr:
+`https://www.faceit.com/api/statistics/v1/cs2/matches/<match_id>/scoreboard-summary?statsType=2`.
+Наличие
 обоих числовых полей у игрока означает готовность; нулевой Swing тоже готов.
 Swing переводится в проценты: например, `0.0187` отображается как `+1.87%`.
 

@@ -849,7 +849,7 @@ class FlareSolverrClient:
         scoreboard_url = (
             f"{FACEIT_WEB_BASE}/api/statistics/v1/"
             f"{quote(game_id, safe='-_')}/matches/"
-            f"{quote(match_id, safe='-')}/match-rounds/1/scoreboard-summary"
+            f"{quote(match_id, safe='-')}/scoreboard-summary?statsType=2"
         )
         solution = self._get_scoreboard_solution(scoreboard_url)
         cache_key = game_id + '/' + match_id
