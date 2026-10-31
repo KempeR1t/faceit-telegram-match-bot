@@ -31,7 +31,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -542,6 +542,77 @@ def finite_float(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def scoreboard_match_stats(
+    payload: dict[str, Any], details: dict[str, Any], game_id: str,
+) -> dict[str, Any] | None:
+    """Convert a complete single-map scoreboard to the Data API stats shape."""
+    data = payload.get("payload")
+    if (payload.get("errors") or not isinstance(data, dict)
+            or not details.get("match_id") or data.get("id") != details["match_id"]):
+        return None
+    game = data.get(game_id)
+    teams = game.get("teams") if isinstance(game, dict) else None
+    if not isinstance(teams, list) or len(teams) != 2:
+        return None
+    voting = details.get("voting", {})
+    maps = voting.get("map", {}) if isinstance(voting, dict) else {}
+    picks = maps.get("pick") if isinstance(maps, dict) else None
+    if (str(details.get("best_of", 1)) != "1" or not isinstance(picks, list)
+            or len(picks) != 1 or not isinstance(picks[0], str) or not picks[0]):
+        return None
+    results, factions = details.get("results"), details.get("teams")
+    if not isinstance(results, dict) or not isinstance(factions, dict):
+        return None
+    scores = results.get("score")
+    if not isinstance(scores, dict) or results.get("winner") not in {"faction1", "faction2"}:
+        return None
+    final_scores = [finite_float(scores.get(name)) for name in ("faction1", "faction2")]
+    if any(value is None or value < 0 or not value.is_integer() for value in final_scores):
+        return None
+
+    converted = []
+    seen_players: set[str] = set()
+    for faction_name in ("faction1", "faction2"):
+        faction = factions.get(faction_name)
+        roster = faction.get("roster") if isinstance(faction, dict) else None
+        if (not isinstance(roster, list) or not roster
+                or any(not isinstance(player, dict) or not isinstance(player.get("player_id"), str)
+                       or not player["player_id"] for player in roster)):
+            return None
+        roster_ids = {player["player_id"] for player in roster}
+        if len(roster_ids) != len(roster):
+            return None
+        candidates = [team for team in teams if isinstance(team, dict)
+                      and isinstance(team.get("players"), list)
+                      and all(isinstance(player, dict) and isinstance(player.get("player_id"), str)
+                              for player in team["players"])
+                      and {player.get("player_id") for player in team["players"]} == roster_ids]
+        if len(candidates) != 1:
+            return None
+        players = []
+        for player in candidates[0]["players"]:
+            player_id, stats = player.get("player_id"), player.get("stats")
+            if player_id in seen_players or not isinstance(stats, dict):
+                return None
+            seen_players.add(player_id)
+            kills, deaths, mvps = [finite_float(stats.get(key)) for key in ("kills", "deaths", "mvps")]
+            kd, adr = finite_float(stats.get("kd")), finite_float(stats.get("adr"))
+            if (any(value is None or value < 0 or not value.is_integer()
+                    for value in (kills, deaths, mvps))
+                    or kd is None or kd < 0 or adr is None or adr < 0):
+                return None
+            players.append({"player_id": player_id, "player_stats": {
+                "Kills": str(int(kills)), "Deaths": str(int(deaths)),
+                "MVPs": str(int(mvps)), "K/D Ratio": f"{kd:.2f}", "ADR": f"{adr:.1f}",
+            }})
+        converted.append({"team_stats": {
+            "Team Win": "1" if results["winner"] == faction_name else "0",
+        }, "players": players})
+    return {"rounds": [{"match_id": details["match_id"], "round_stats": {
+        "Map": picks[0], "Score": " / ".join(str(int(score)) for score in final_scores),
+    }, "teams": converted}]}
+
+
 def decode_flaresolverr_json(body: Any) -> dict[str, Any] | None:
     if isinstance(body, dict):
         return body
@@ -589,6 +660,7 @@ class FlareSolverrClient:
         self._session_id: str | None = None
         self._cache_file = cache_file
         self._rating_cache = self._load_rating_cache()
+        self._scoreboard_payloads: dict[str, dict[str, Any]] = {}
 
     def _load_rating_cache(self) -> dict[str, dict[str, FaceitRating]]:
         if self._cache_file is None or not self._cache_file.exists():
@@ -842,27 +914,43 @@ class FlareSolverrClient:
                 time.sleep(self.SCOREBOARD_REQUEST_RETRY_SECONDS)
         return None
 
-    def match_ratings(
-        self, match_id: str, game_id: str
-    ) -> dict[str, FaceitRating]:
-        LOGGER.info("Looking up FACEIT Rating/Swing for match %s.", match_id)
+    def _match_scoreboard(self, match_id: str, game_id: str) -> dict[str, Any] | None:
+        cache_key = game_id + '/' + match_id
+        if cache_key in self._scoreboard_payloads:
+            return self._scoreboard_payloads[cache_key]
         scoreboard_url = (
             f"{FACEIT_WEB_BASE}/api/statistics/v1/"
             f"{quote(game_id, safe='-_')}/matches/"
             f"{quote(match_id, safe='-')}/scoreboard-summary?statsType=2"
         )
         solution = self._get_scoreboard_solution(scoreboard_url)
+        payload = decode_flaresolverr_json(solution.get("response")) if solution else None
+        if payload is not None:
+            self._scoreboard_payloads[cache_key] = payload
+        return payload
+
+    def match_stats(
+        self, match_id: str, game_id: str, details: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        LOGGER.info("Looking up fallback FACEIT statistics for match %s.", match_id)
+        payload = self._match_scoreboard(match_id, game_id)
+        stats = scoreboard_match_stats(payload, details, game_id) if payload else None
+        if stats is None:
+            LOGGER.warning("No complete fallback statistics for match %s.", match_id)
+        return stats
+
+    def match_ratings(
+        self, match_id: str, game_id: str
+    ) -> dict[str, FaceitRating]:
+        LOGGER.info("Looking up FACEIT Rating/Swing for match %s.", match_id)
+        payload = self._match_scoreboard(match_id, game_id)
         cache_key = game_id + '/' + match_id
-        if solution is None:
+        if payload is None:
             self._destroy_session()
             cached = dict(self._rating_cache.get(cache_key, {}))
             if cached:
                 LOGGER.info('Using saved FACEIT Rating/Swing for %s player(s).', len(cached))
             return cached
-        payload = decode_flaresolverr_json(solution.get("response"))
-        if payload is None:
-            LOGGER.warning("FACEIT scoreboard response is not valid JSON.")
-            return {}
         ratings = self._remember_ratings(cache_key, extract_faceit_ratings(payload, game_id))
         LOGGER.info("Loaded FACEIT Rating and Swing for %s player(s), match %s.", len(ratings), match_id)
         return ratings
@@ -1426,8 +1514,18 @@ def _run_once(
 
         stats_data = faceit.match_stats(match_id)
         if stats_data is None:
-            had_error = True
-            break
+            fallback = getattr(flaresolverr, "match_stats", None)
+            if callable(fallback):
+                try:
+                    stats_data = fallback(match_id, config.game_id, match_details)
+                except Exception as exc:
+                    LOGGER.warning("Fallback statistics failed for match %s (%s).",
+                                   match_id, type(exc).__name__)
+            if stats_data is None:
+                LOGGER.warning("Statistics unavailable from both sources for match %s; queue paused.", match_id)
+                had_error = True
+                break
+            LOGGER.info("Using scoreboard fallback statistics for match %s.", match_id)
 
         faceit_ratings = ratings_for_match(flaresolverr, match_id, config.game_id)
         match_players = tracked_match_players(stats_data, config.players)
