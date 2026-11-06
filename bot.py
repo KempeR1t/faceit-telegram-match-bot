@@ -27,14 +27,16 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
+from curl_cffi import CurlOpt, requests as curl_requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
+FACEIT_STATS_API_BASE = "https://api.faceit.com"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 RATING_UPDATE_WINDOW_SECONDS = 4 * 60 * 60
 PENDING_MESSAGES_KEY = "__pending_messages__"
@@ -67,6 +69,7 @@ class Config:
     flaresolverr_max_timeout_ms: int
     notify_on_first_run: bool
     log_level: str
+    curl_cffi_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -112,6 +115,7 @@ class Config:
         flaresolverr_enabled = parse_bool_env(
             "FLARESOLVERR_ENABLED", default=True
         )
+        curl_cffi_enabled = parse_bool_env("CURL_CFFI_ENABLED", default=True)
         flaresolverr_url = normalize_flaresolverr_url(
             os.getenv("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1")
         )
@@ -145,6 +149,7 @@ class Config:
             flaresolverr_max_timeout_ms=flaresolverr_max_timeout_ms,
             notify_on_first_run=notify_on_first_run,
             log_level=log_level,
+            curl_cffi_enabled=curl_cffi_enabled,
         )
 
 
@@ -635,8 +640,8 @@ def decode_flaresolverr_json(body: Any) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-class FlareSolverrClient:
-    """Fetch optional FACEIT scoreboard data through a private FlareSolverr."""
+class FaceitScoreboardClient:
+    """Fetch scoreboard data directly, with an optional browser fallback."""
 
     SESSION_PREFIX = "faceit-bot-"
     SCOREBOARD_REQUEST_ATTEMPTS = 2
@@ -649,6 +654,10 @@ class FlareSolverrClient:
         max_timeout_ms: int,
         cleanup_stale_sessions: bool = False,
         cache_file: Path | None = None,
+        *,
+        curl_cffi_enabled: bool = False,
+        flaresolverr_enabled: bool = True,
+        request_timeout: float = 15.0,
     ) -> None:
         self._session = session
         self._endpoint = endpoint
@@ -661,6 +670,10 @@ class FlareSolverrClient:
         self._cache_file = cache_file
         self._rating_cache = self._load_rating_cache()
         self._scoreboard_payloads: dict[str, dict[str, Any]] = {}
+        self._curl_cffi_enabled = curl_cffi_enabled
+        self._flaresolverr_enabled = flaresolverr_enabled
+        self._request_timeout = request_timeout
+        self._curl_session: curl_requests.Session | None = None
 
     def _load_rating_cache(self) -> dict[str, dict[str, FaceitRating]]:
         if self._cache_file is None or not self._cache_file.exists():
@@ -914,6 +927,59 @@ class FlareSolverrClient:
                 time.sleep(self.SCOREBOARD_REQUEST_RETRY_SECONDS)
         return None
 
+    def _curl_scoreboard(self, match_id: str, game_id: str) -> dict[str, Any] | None:
+        url = (
+            f"{FACEIT_STATS_API_BASE}/statistics/v1/"
+            f"{quote(game_id, safe='-_')}/matches/"
+            f"{quote(match_id, safe='-')}/scoreboard-summary?statsType=2"
+        )
+        started = time.monotonic()
+        try:
+            if self._curl_session is None:
+                self._curl_session = curl_requests.Session(
+                    impersonate="firefox",
+                    trust_env=False,
+                    curl_options={CurlOpt.IPRESOLVE: 1},
+                )
+            response = self._curl_session.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Origin": FACEIT_WEB_BASE,
+                    "Referer": f"{FACEIT_WEB_BASE}/",
+                },
+                timeout=(10, self._request_timeout),
+            )
+        except curl_requests.RequestsError as exc:
+            LOGGER.warning(
+                "curl_cffi scoreboard request failed for match %s after %.1fs (%s).",
+                match_id, time.monotonic() - started, type(exc).__name__,
+            )
+            return None
+
+        LOGGER.info(
+            "curl_cffi scoreboard lookup for match %s: HTTP %s in %.2fs.",
+            match_id, response.status_code, time.monotonic() - started,
+        )
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            LOGGER.warning("curl_cffi returned invalid scoreboard JSON for match %s.", match_id)
+            return None
+        data = payload.get("payload") if isinstance(payload, dict) else None
+        game = data.get(game_id) if isinstance(data, dict) else None
+        if (not isinstance(payload, dict) or payload.get("errors")
+                or not isinstance(data, dict) or data.get("id") != match_id
+                or not isinstance(game, dict) or not isinstance(game.get("teams"), list)):
+            LOGGER.warning(
+                "curl_cffi returned invalid or unavailable scoreboard data for match %s.",
+                match_id,
+            )
+            return None
+        return payload
+
     def _match_scoreboard(self, match_id: str, game_id: str) -> dict[str, Any] | None:
         cache_key = game_id + '/' + match_id
         if cache_key in self._scoreboard_payloads:
@@ -923,8 +989,12 @@ class FlareSolverrClient:
             f"{quote(game_id, safe='-_')}/matches/"
             f"{quote(match_id, safe='-')}/scoreboard-summary?statsType=2"
         )
-        solution = self._get_scoreboard_solution(scoreboard_url)
-        payload = decode_flaresolverr_json(solution.get("response")) if solution else None
+        payload = self._curl_scoreboard(match_id, game_id) if self._curl_cffi_enabled else None
+        if payload is None and self._flaresolverr_enabled:
+            if self._curl_cffi_enabled:
+                LOGGER.info("Falling back to FlareSolverr for match %s.", match_id)
+            solution = self._get_scoreboard_solution(scoreboard_url)
+            payload = decode_flaresolverr_json(solution.get("response")) if solution else None
         if payload is not None:
             self._scoreboard_payloads[cache_key] = payload
         return payload
@@ -968,10 +1038,36 @@ class FlareSolverrClient:
             self._session_inventory_checked = False
 
     def close(self) -> None:
-        self._destroy_session()
-        if self._cleanup_stale_sessions and self._session_creation_attempted:
-            self._cleanup_owned_sessions()
-        self._session_creation_attempted = False
+        try:
+            self._destroy_session()
+            if self._cleanup_stale_sessions and self._session_creation_attempted:
+                self._cleanup_owned_sessions()
+            self._session_creation_attempted = False
+        finally:
+            if self._curl_session is not None:
+                self._curl_session.close()
+                self._curl_session = None
+
+
+# Preserve the existing browser-only constructor used by operator scripts.
+FlareSolverrClient = FaceitScoreboardClient
+
+
+def build_scoreboard_client(
+    config: Config, session: requests.Session,
+) -> FaceitScoreboardClient | None:
+    if not config.curl_cffi_enabled and not config.flaresolverr_enabled:
+        return None
+    return FaceitScoreboardClient(
+        session,
+        config.flaresolverr_url,
+        config.flaresolverr_max_timeout_ms,
+        cleanup_stale_sessions=True,
+        cache_file=config.state_file.with_name("faceit_ratings.json"),
+        curl_cffi_enabled=config.curl_cffi_enabled,
+        flaresolverr_enabled=config.flaresolverr_enabled,
+        request_timeout=config.request_timeout,
+    )
 
 
 class TelegramClient:
@@ -1427,12 +1523,12 @@ def run_once(
         try:
             return _run_once(config, faceit, telegram, flaresolverr)
         finally:
-            if isinstance(flaresolverr, FlareSolverrClient):
+            if isinstance(flaresolverr, FaceitScoreboardClient):
                 try:
                     flaresolverr.close()
                 except Exception as exc:
                     LOGGER.warning(
-                        "Could not clean up the private FlareSolverr session (%s).",
+                        "Could not close the FACEIT scoreboard transports (%s).",
                         type(exc).__name__,
                     )
 
@@ -1633,18 +1729,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_config:
         LOGGER.info(
             "Configuration is valid: %s player(s), game=%s, timezone=%s, "
-            "state=%s, flaresolverr=%s, telegram_proxy=%s.",
+            "state=%s, curl_cffi=%s, flaresolverr=%s, telegram_proxy=%s.",
             len(config.players),
             config.game_id,
             config.timezone_name,
             config.state_file,
+            "enabled" if config.curl_cffi_enabled else "disabled",
             "enabled" if config.flaresolverr_enabled else "disabled",
             "enabled" if config.telegram_proxy_url else "disabled",
         )
         return 0
 
     session = build_http_session()
-    flaresolverr: FlareSolverrClient | None = None
     try:
         telegram = TelegramClient(
             session,
@@ -1663,15 +1759,8 @@ def main(argv: list[str] | None = None) -> int:
         faceit = FaceitClient(
             session, config.faceit_api_key, config.request_timeout
         )
-        if config.flaresolverr_enabled:
-            flaresolverr = FlareSolverrClient(
-                session,
-                config.flaresolverr_url,
-                config.flaresolverr_max_timeout_ms,
-                cleanup_stale_sessions=True,
-                cache_file=config.state_file.with_name('faceit_ratings.json'),
-            )
-        return run_once(config, faceit, telegram, flaresolverr)
+        scoreboard = build_scoreboard_client(config, session)
+        return run_once(config, faceit, telegram, scoreboard)
     except StateError as exc:
         LOGGER.error("State error: %s", exc)
         return 2

@@ -171,6 +171,7 @@ class ConfigurationTests(unittest.TestCase):
             config.telegram_proxy_url,
             "socks5h://127.0.0.1:1080",
         )
+        self.assertTrue(config.curl_cffi_enabled)
 
     def test_empty_telegram_proxy_is_disabled(self) -> None:
         self.assertIsNone(normalize_telegram_proxy_url("  "))

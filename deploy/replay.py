@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bot import (Config, FaceitClient, FlareSolverrClient, MatchHistoryResult,
+from bot import (Config, FaceitClient, MatchHistoryResult, build_scoreboard_client,
                  SENT_MATCHES_KEY, TelegramClient, build_http_session,
                  configure_logging, load_state, run_once)
 
@@ -58,10 +58,7 @@ def main():
         replay = prepare_replay(client, config, snapshot)
         telegram = TelegramClient(session, config.telegram_bot_token, config.telegram_chat_id,
                                   config.request_timeout, config.telegram_proxy_url)
-        if config.flaresolverr_enabled:
-            provider = FlareSolverrClient(session, config.flaresolverr_url,
-                                         config.flaresolverr_max_timeout_ms, cleanup_stale_sessions=True,
-                                         cache_file=config.state_file.with_name('faceit_ratings.json'))
+        provider = build_scoreboard_client(config, session)
         return run_once(config, replay, telegram, provider)
 
 
