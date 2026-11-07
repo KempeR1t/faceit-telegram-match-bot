@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 BASE_DIR = Path(__file__).resolve().parent
 FACEIT_API_BASE = "https://open.faceit.com/data/v4"
 FACEIT_WEB_BASE = "https://www.faceit.com"
@@ -941,15 +941,24 @@ class FaceitScoreboardClient:
                     trust_env=False,
                     curl_options={CurlOpt.IPRESOLVE: 1},
                 )
-            response = self._curl_session.get(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "Origin": FACEIT_WEB_BASE,
-                    "Referer": f"{FACEIT_WEB_BASE}/",
-                },
-                timeout=(10, self._request_timeout),
-            )
+            for request_attempt in range(2):
+                response = self._curl_session.get(
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "Origin": FACEIT_WEB_BASE,
+                        "Referer": f"{FACEIT_WEB_BASE}/",
+                    },
+                    timeout=(10, self._request_timeout),
+                )
+                if response.status_code != 403 or request_attempt == 1:
+                    break
+                LOGGER.info(
+                    "curl_cffi received HTTP 403 for match %s; "
+                    "retrying once in the same session after 1 second.",
+                    match_id,
+                )
+                time.sleep(1)
         except curl_requests.RequestsError as exc:
             LOGGER.warning(
                 "curl_cffi scoreboard request failed for match %s after %.1fs (%s).",

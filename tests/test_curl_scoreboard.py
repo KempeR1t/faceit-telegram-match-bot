@@ -77,21 +77,21 @@ class CurlScoreboardTests(unittest.TestCase):
 
     def test_failed_or_invalid_direct_response_falls_back_and_delivers(self):
         cases = [
-            FakeResponse(403, {}),
-            FakeResponse(503, {}),
-            InvalidJSONResponse(),
-            FakeResponse(200, {"errors": [{"code": "err_f0"}]}),
-            FakeResponse(200, scoreboard_case("another-match")[1]),
-            curl_requests.RequestsError("Connection failed"),
+            [FakeResponse(403, {}), FakeResponse(403, {})],
+            [FakeResponse(503, {})],
+            [InvalidJSONResponse()],
+            [FakeResponse(200, {"errors": [{"code": "err_f0"}]})],
+            [FakeResponse(200, scoreboard_case("another-match")[1])],
+            [curl_requests.RequestsError("Connection failed")],
         ]
-        for response in cases:
-            with self.subTest(response=type(response).__name__), tempfile.TemporaryDirectory() as directory:
+        for responses in cases:
+            with self.subTest(response=type(responses[0]).__name__), tempfile.TemporaryDirectory() as directory:
                 state = Path(directory) / "state.json"
                 state.write_text(json.dumps({PLAYER_ID: "baseline"}))
                 browser = FakeHTTPSession(browser_responses("match"))
-                direct = FakeCurlSession([response])
+                direct = FakeCurlSession(responses)
                 telegram = FakeTelegram()
-                with patch("bot.curl_requests.Session", return_value=direct):
+                with patch("bot.curl_requests.Session", return_value=direct), patch("bot.time.sleep"):
                     config = make_config(state)
                     provider = build_scoreboard_client(config, browser)
                     result = run_once(config, FakeFaceit("match"), telegram, provider)
@@ -116,10 +116,10 @@ class CurlScoreboardTests(unittest.TestCase):
             }})
             cache_file.write_text(cached)
             browser = FakeHTTPSession([])
-            direct = FakeCurlSession([FakeResponse(403, {}), FakeResponse(403, {})])
+            direct = FakeCurlSession([FakeResponse(403, {}) for _ in range(4)])
             config = replace(make_config(state), flaresolverr_enabled=False)
             telegram = FakeTelegram()
-            with patch("bot.curl_requests.Session", return_value=direct):
+            with patch("bot.curl_requests.Session", return_value=direct), patch("bot.time.sleep"):
                 provider = build_scoreboard_client(config, browser)
                 ratings = provider.match_ratings("missing-match", "cs2")
                 result = run_once(config, MissingStatsFaceit("unused"), telegram, provider)
@@ -130,6 +130,34 @@ class CurlScoreboardTests(unittest.TestCase):
             self.assertEqual(state.read_text(), original)
             self.assertEqual(cache_file.read_text(), cached)
             self.assertEqual(browser.requests, [])
+
+    def test_403_retry_delivers_missing_stats_without_browser_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps({PLAYER_ID: "baseline"}))
+            browser = FakeHTTPSession([])
+            direct = FakeCurlSession([
+                FakeResponse(403, {}),
+                FakeResponse(200, scoreboard_case("missing-match")[1]),
+                FakeResponse(200, scoreboard_case("next-match")[1]),
+            ])
+            config = replace(make_config(state), flaresolverr_enabled=False)
+            telegram = FakeTelegram()
+            with patch("bot.curl_requests.Session", return_value=direct) as factory, patch("bot.time.sleep") as sleep:
+                provider = build_scoreboard_client(config, browser)
+                result = run_once(config, MissingStatsFaceit("unused"), telegram, provider)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(telegram.messages), 2)
+            self.assertIn("12/28", telegram.messages[0])
+            self.assertIn("🔻 -6.15%", telegram.messages[0])
+            self.assertEqual(json.loads(state.read_text())[PLAYER_ID], "next-match")
+            self.assertEqual(len(direct.requests), 3)
+            self.assertEqual(direct.requests[0]["url"], direct.requests[1]["url"])
+            factory.assert_called_once()
+            sleep.assert_called_once_with(1)
+            self.assertEqual(browser.requests, [])
+            self.assertTrue(direct.closed)
 
     def test_pending_message_receives_ratings_on_a_later_direct_lookup(self):
         with tempfile.TemporaryDirectory() as directory:
